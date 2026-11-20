@@ -4,29 +4,30 @@
 [hidden] { display: none !important; }
 
 :root {
-  --bg: #F8F3EC;
-  --surface: #FFFDF9;
-  --surface-2: #F1EAE0;
-  --ink: #2A2420;
-  --ink-2: #6B5F56;
-  --muted: #9A8D82;
-  --line: #E7DED2;
-  --accent: #C4643A;
+  --bg: #F7F5F0;
+  --surface: #FFFFFF;
+  --surface-2: #EFECE6;
+  --ink: #1E1D1B;
+  --ink-2: #6E6A63;
+  --muted: #6E6A63;
+  --line: #E6E1D8;
+  --accent: #4A5D4E;
   --accent-ink: #FFFFFF;
-  --accent-soft: #F5E2D6;
-  --sage: #5F8A5A;
-  --sage-soft: #E2ECDD;
-  --amber: #C98A1E;
-  --amber-soft: #FAEBCD;
+  --accent-soft: #E5EBE6;
+  --sage: #4A5D4E;
+  --sage-soft: #E5EBE6;
+  --amber: #B59A6B;
+  --amber-soft: #F4EFE6;
+  --gold-ink: #8A7141;
   --ice: #4A85AA;
   --ice-soft: #DFECF5;
   --danger: #B3473A;
   --danger-soft: #F7E0DC;
-  --c1: #C4643A; --c2: #5F8A5A; --c3: #C98A1E; --c4: #4A85AA; --c5: #8C5B86;
+  --c1: #4A5D4E; --c2: #5F8A5A; --c3: #C98A1E; --c4: #4A85AA; --c5: #8C5B86;
 
   --radius: 20px;
   --radius-sm: 12px;
-  --shadow: 0 1px 2px rgba(70, 45, 20, .05), 0 8px 24px rgba(70, 45, 20, .06);
+  --shadow: 0 1px 2px rgba(30, 29, 27, .04), 0 6px 20px rgba(30, 29, 27, .05);
   --serif: ui-serif, "New York", "Iowan Old Style", "Palatino", Georgia, serif;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
   --tabbar-h: 60px;
@@ -44,9 +45,9 @@
     --ink-2: #C5B8AB;
     --muted: #8C7F74;
     --line: #382F29;
-    --accent: #E27D52;
-    --accent-ink: #1A120D;
-    --accent-soft: #3B261B;
+    --accent: #8FAE94;
+    --accent-ink: #11160F;
+    --accent-soft: #1F2A22;
     --sage: #8DB386;
     --sage-soft: #1E2A1C;
     --amber: #E6A944;
@@ -55,7 +56,7 @@
     --ice-soft: #15242E;
     --danger: #E07A6C;
     --danger-soft: #3A1E1A;
-    --c1: #E27D52; --c2: #8DB386; --c3: #E6A944; --c4: #7DB1D3; --c5: #C190BB;
+    --c1: #8FAE94; --c2: #8DB386; --c3: #E6A944; --c4: #7DB1D3; --c5: #C190BB;
     --shadow: 0 1px 0 rgba(255, 255, 255, .03);
   }
 }
@@ -226,7 +227,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .rcard-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-2); color: var(--ink-2); }
 .badge svg { width: 12px; height: 12px; }
-.badge-hot { background: var(--amber-soft); color: var(--amber); }
+.badge-hot { background: var(--amber-soft); color: var(--gold-ink, var(--amber)); }
 .badge-ice { background: var(--ice-soft); color: var(--ice); }
 .badge-warn { background: var(--danger-soft); color: var(--danger); }
 .missing-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 10px; background: var(--bg); border-radius: var(--radius-sm); font-size: 14px; }
@@ -564,7 +565,7 @@ details.pf[open] > summary::after { content: '−'; }
 .alert-danger .alert-head { color: var(--danger); }
 .alert ul li { font-size: 14px; }
 
-.badge-spoon { background: var(--amber-soft); color: var(--amber); }
+.badge-spoon { background: var(--amber-soft); color: var(--gold-ink, var(--amber)); }
 .badge-fridge { background: var(--sage-soft); color: var(--sage); }
 
 .master { display: flex; gap: 12px; padding: 12px; border-radius: 16px; background: var(--bg); }

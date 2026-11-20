@@ -483,16 +483,16 @@ function gantt(tl, jobs) {
 function aiCard(mode) {
   const both = mode === 'rules';
   const text = mode === 'batch'
-    ? 'Copies your cart, protein grams, locks, appliances, pantry and macro targets, plus a strict JSON reply format.'
-    : 'Copies your fridge, Use First items, pantry staples, locks, appliances and daily macro targets, plus a strict JSON reply format.';
+    ? 'Copies your cart, protein, pantry staples, rules, and macro targets. Paste it into your AI chat for fresh meal ideas, then paste the reply back here.'
+    : 'Copies your cart, protein, pantry staples, rules, and macro targets. Paste it into your AI chat for fresh meal ideas, then paste the reply back here.';
   return `<section class="card ai-card">
-    <div class="card-head"><h2>${I.spark} AI Chef Bridge</h2><span class="hint">Prompt out · JSON in</span></div>
+    <div class="card-head"><h2>${I.spark} AI Chef Bridge</h2><span class="hint">Gemini Co-Pilot</span></div>
     <p class="micro">${both ? 'Send your rules and kitchen to any AI chat, then import the recipe or batch plan JSON it replies with.' : text} Paste it into any AI chat, then import its reply here.</p>
     <div class="btn-row">
       ${both
         ? `<button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="recipe">${I.copy}Recipe prompt</button><button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="batch">${I.copy}Batch prompt</button>`
         : `<button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="${mode}">${I.copy}Copy Prompt for AI Chef</button>`}
-      <button type="button" class="btn btn-primary" data-act="openImport">${I.download}Import JSON</button>
+      <button type="button" class="btn btn-primary" data-act="openImport">${I.download}Paste New Plan</button>
     </div>
   </section>`;
 }
