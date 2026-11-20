@@ -1,5 +1,8 @@
 /* style.css — mobile-first, warm modern minimalist. Layout & styling only. */
 
+/* Let the hidden attribute win over display:flex, so closed overlays don't block taps. */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #F8F3EC;
   --surface: #FFFDF9;
