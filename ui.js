@@ -6,7 +6,7 @@ import { createStore } from './storage.js';
 import { APPLIANCES, LOCKS, INGREDIENT_GROUPS, INGREDIENTS, QUICK_ADDS } from './recipes.js';
 
 const store = createStore();
-const PERSISTED = ['settings', 'targets', 'mealLogs', 'weightLogs', 'fridge', 'batch', 'recipePrefs', 'cart', 'customRecipes'];
+const PERSISTED = ['settings', 'targets', 'mealLogs', 'weightLogs', 'fridge', 'batch', 'recipePrefs', 'cart', 'customRecipes', 'customPantry'];
 
 let S = E.defaultUserData(); // persisted user data
 const UI = {
@@ -17,11 +17,18 @@ const UI = {
   weightMetric: 'kg',
   showMeasure: false,
   undo: null,
-  pfOpen: false,
+  aiOpen: false,
+  modal: null, // 'import' | 'write'
   importText: '',
   importResult: null,
   importReplace: false,
+  draft: null, // Write My Own form state
+  draftErrors: [],
+  genVariant: 0,
+  genNotes: [],
 };
+
+const emptyDraft = () => ({ title: '', cuisine: S.fridge.genCuisine || 'Japanese', slot: '', servings: 2, active: 15, passive: 15, ings: [{ name: '', amt: '', unit: 'g' }, { name: '', amt: '', unit: 'g' }, { name: '', amt: '', unit: 'g' }], steps: '', tip: '' });
 
 // ------------------------------------------------------------------------------------------
 // Small helpers
@@ -74,6 +81,12 @@ function prefs(id) {
 function persist(...keys) {
   keys.forEach((k) => store.save(k, S[k]));
 }
+
+function syncCustom() {
+  E.setCustomData(S.customRecipes, S.customPantry);
+}
+
+const isDraft = (id) => !!E.draftRecipe() && E.draftRecipe().id === id;
 
 function availability() {
   return E.buildAvailability({
@@ -170,6 +183,8 @@ function renderQuick() {
     </form>
   </section>`;
 
+  h += chefCard(trayIds.length + f.custom.length);
+
   // Mood picker
   h += `<div class="rail moods">${['All', ...E.listMoods()].map((m) => `<button type="button" class="mood ${f.mood === m ? 'on' : ''}" data-act="mood" data-v="${esc(m)}">${esc(m)}</button>`).join('')}</div>`;
 
@@ -196,8 +211,18 @@ function renderQuick() {
   if (rk.hidden.length) {
     h += `<button type="button" class="hidden-note" data-act="tab" data-v="rules">${rk.hidden.length} recipe${rk.hidden.length > 1 ? 's' : ''} hidden by your Rules (${esc(rk.hidden.map((x) => x.reasons[0]).slice(0, 2).join('; '))})</button>`;
   }
-  h += aiCard('recipe');
   return h;
+}
+
+function chefCard(count) {
+  const cur = S.fridge.genCuisine;
+  return `<section class="card chef-card">
+    <div class="card-head"><h2>${I.spark} Chef's Creation</h2><span class="hint">${count ? `${count} selected` : 'Select ingredients above'}</span></div>
+    <p class="micro">Builds a complete recipe from your selected ingredients, pantry staples and appliances: exact grams, live macros, active vs passive time and chef technique.</p>
+    <div class="chips" role="radiogroup" aria-label="Cuisine">${E.listGenCuisines().map((c) => `<button type="button" class="chip ${c === cur ? 'on' : ''}" role="radio" aria-checked="${c === cur}" data-act="genCuisine" data-v="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+    <button type="button" class="btn btn-primary btn-lg" data-act="genRecipe">${I.spark}Create Recipe From Selected Ingredients</button>
+    <button type="button" class="btn btn-soft" data-act="openWrite">${I.plus}Write My Own Recipe</button>
+  </section>`;
 }
 
 function resultCard(x, mode) {
@@ -232,9 +257,13 @@ function resultCard(x, mode) {
 }
 
 // ------------------------------------------------------------------------------------------
-// TAB 2 — BATCH CART & MASTER PROTEIN BUILDER
+// TAB 2 — 7-DAY MEAL PLANNER (21 meals, one unified prep session)
 // ------------------------------------------------------------------------------------------
 const SLOT_ICON = { Breakfast: '☀️', Lunch: '🥗', Dinner: '🌙' };
+const PHASES = [
+  { id: 1, title: 'Phase 1 · Breakfast batch & long-cook bases', text: 'The week\'s breakfasts go in first, while the rice, grains and potatoes start on the hob, Instant Pot or air fryer.' },
+  { id: 2, title: 'Phase 2 · Lunch & dinner, all at once', text: 'Main proteins cook in parallel while you prep vegetables and whisk the flavor kit sauces.' },
+];
 
 function storageBadge(tag) {
   const t = tag && E.getStorageTag(tag);
@@ -259,140 +288,101 @@ function stepperHTML(act, display, { min = false, max = false, id = '' } = {}) {
 }
 
 function renderBatch() {
-  const plan = E.planCart(S.cart, S.settings, S.recipePrefs);
-  let h = `<p class="lede">Build the week from <b>meal blocks</b>. Lunches and dinners that share a protein are cooked <b>once</b>, neutrally, then each block gets its own cuisine <b>Flavor Kit</b>.</p>`;
-  h += builderCard();
-  h += proteinFirstCard();
-  h += cartCard(plan);
-  if (plan.containers.length) {
-    const tl = plan.timeline;
-    h += `<div class="tiles">
-      <div class="tile"><b>${plan.totals.containers}</b><span>Boxes</span></div>
-      <div class="tile"><b>${plan.totals.days}</b><span>Days</span></div>
-      <div class="tile tile-p"><b>${Math.round(plan.totals.avgProtein)}<small>g</small></b><span>Avg P / box</span></div>
-      <div class="tile"><b>${tl ? E.formatMinutes(tl.makespan).replace(' min', 'm') : '—'}</b><span>Prep session</span></div>
-    </div>`;
-    h += mastersCard(plan);
-    h += containersCard(plan);
-    h += groceryCard(plan);
-    if (tl) h += timelineCard(tl);
+  const plan = S.cart.blocks.length ? E.planCart(S.cart, S.settings, S.recipePrefs) : null;
+  let h = `<p class="lede">Plan <b>Breakfast, Lunch and Dinner for Days 1–7</b> and cook all 21 meals in <b>one parallel session</b>. Days 1–4 go in the fridge, Days 5–7 in the freezer.</p>`;
+  h += weekSetupCard(!!plan);
+  if (!plan) return h;
+  if (!plan.containers.length) {
+    return `${h}<div class="empty">Nothing in this plan fits your current rules. Change the cuisines or rules, then generate again.</div>`;
   }
-  h += aiCard('batch');
+  const tl = plan.timeline;
+  h += `<div class="tiles">
+    <div class="tile"><b>${plan.totals.containers}</b><span>Meals</span></div>
+    <div class="tile tile-p"><b>${Math.round(plan.totals.avgProteinPerDay)}<small>g</small></b><span>Protein / day</span></div>
+    <div class="tile"><b>${r0(plan.totals.avgKcalPerDay)}</b><span>kcal / day</span></div>
+    <div class="tile"><b>${tl ? E.formatMinutes(tl.makespan).replace(' min', 'm') : '—'}</b><span>One session</span></div>
+  </div>`;
+  const warns = [...new Set([...(S.cart.genWarnings || []), ...plan.warnings])];
+  if (warns.length) h += `<div class="alert"><div class="alert-head">${I.warn}<b>Heads up</b></div><ul>${warns.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
+  h += rotationCard(plan);
+  h += scheduleCard(plan);
+  if (tl) h += sessionCard(plan, tl);
+  h += groceryCard(plan);
   return h;
 }
 
-function builderCard() {
-  const b = S.cart.builder;
+function weekSetupCard(hasPlan) {
+  const w = S.cart.week;
   const proteins = E.masterProteins(S.settings);
-  if (b.slot !== 'Breakfast' && !proteins.includes(b.protein)) b.protein = proteins[0];
+  if (!proteins.includes(w.protein)) w.protein = proteins[0];
+  const methods = E.masterMethodOptions(S.settings);
   return `<section class="card">
-    <div class="card-head"><h2>Add a meal block</h2><span class="hint">Count · Slot · Cuisine</span></div>
-    <div class="builder-row">
-      <div><h3 class="label">Count</h3>${stepperHTML('bCount', b.count, { min: b.count <= 1, max: b.count >= 10 })}</div>
-      <div class="grow"><h3 class="label">Meal slot</h3>${seg('bSlot', E.listMealSlots().map((s) => [s, s]), b.slot)}</div>
-    </div>
-    <div><h3 class="label">Cuisine</h3>
-    <div class="chips">${E.listBatchCuisines().map((cu) => `<button type="button" class="chip ${b.cuisine === cu ? 'on' : ''}" data-act="bCuisine" data-v="${esc(cu)}">${esc(cu)}</button>`).join('')}</div></div>
-    ${b.slot !== 'Breakfast' ? `<label class="field"><span class="label">Protein (pooled into one master cook)</span><select data-change="bProtein">${proteins.map((p) => `<option value="${p}" ${p === b.protein ? 'selected' : ''}>${esc(name(p))}</option>`).join('')}</select></label>` : '<p class="micro">Breakfast blocks use a self-contained breakfast base, such as baked tortilla squares or egg bites.</p>'}
-    <button type="button" class="btn btn-primary" data-act="addBlock">${I.plus}Add ${b.count} × ${esc(b.slot)} (${esc(b.cuisine)})</button>
+    <div class="card-head"><h2>Plan your week</h2><span class="hint">7 days × 3 meals</span></div>
+    <div class="field"><h3 class="label">Breakfast variety</h3>${seg('wBreakfast', [[1, '1 for all 7 days'], [2, '2 · Days 1–4 + 5–7']], w.breakfastVariety)}</div>
+    <div class="field"><h3 class="label">Lunch & dinner</h3>${seg('wMode', [['master', '1 Protein + 3 Kits'], ['rotate', 'Rotating dishes']], w.mainMode)}
+      <p class="micro">${w.mainMode === 'master'
+        ? 'One protein is cooked once, neutrally, then split across 3 cuisine Flavor Kits that rotate through the 14 lunches and dinners. Each kit is eaten 4–5 times.'
+        : 'Full recipes from your library rotate through the week, with flavor kits filling any gaps. Lunches and dinners each get their own dishes.'}</p></div>
+    ${w.mainMode === 'rotate'
+      ? `<div class="field"><h3 class="label">Dishes per slot</h3>${seg('wDishes', [[2, '2 · each 3–4×'], [3, '3 · each 2–3×']], w.dishesPerSlot)}</div>`
+      : `<label class="field"><span class="label">Master protein</span><select data-change="wProtein">${proteins.map((p) => `<option value="${p}" ${p === w.protein ? 'selected' : ''}>${esc(name(p))}</option>`).join('')}</select></label>`}
+    <div class="field"><h3 class="label">Cuisine mix</h3>
+      <div class="chips">${E.listBatchCuisines().map((cu) => `<button type="button" class="chip ${w.cuisines.includes(cu) ? 'on' : ''}" data-act="wCuisine" data-v="${esc(cu)}" aria-pressed="${w.cuisines.includes(cu)}">${w.cuisines.includes(cu) ? I.check : ''}${esc(cu)}</button>`).join('')}</div></div>
+    <details class="more inset"><summary>Fine-tune portions & cooking</summary>
+      <div class="stack">
+        <div class="row-between"><div><h3 class="label">Raw protein per serving</h3><small class="micro">For the master protein cook</small></div>
+          ${stepperHTML('raw', `${S.cart.rawPerServing} g`, { min: S.cart.rawPerServing <= 100, max: S.cart.rawPerServing >= 220 })}</div>
+        <div class="field"><h3 class="label">Master cook method</h3>${seg('method', [['auto', 'Auto'], ...methods.map((m) => [m.id, m.label])], S.cart.method)}</div>
+      </div>
+    </details>
+    ${hasPlan && S.cart.genFrom && S.cart.genFrom !== weekKey(w) ? `<p class="micro warn-text">${I.warn} Settings changed. Regenerate to apply them.</p>` : ''}
+    <button type="button" class="btn btn-primary btn-lg" data-act="genWeek">${I.spark}${hasPlan ? 'Regenerate 7-Day Plan' : 'Generate 7-Day Plan (21 meals)'}</button>
+    ${hasPlan ? `<div class="btn-row"><button type="button" class="btn btn-soft" data-act="shuffleWeek">${I.swap}Shuffle</button><button type="button" class="btn btn-soft" data-act="clearCart">${I.trash}Clear plan</button></div>` : ''}
   </section>`;
 }
 
-function proteinFirstCard() {
-  const pf = S.cart.pf;
+function rotationCard(plan) {
   const proteins = E.masterProteins(S.settings);
-  if (!proteins.includes(pf.protein)) pf.protein = proteins[0];
-  const y = E.proteinYield(pf.grams);
-  const counts = E.distributeCount(y.best, pf.cuisines.length || 1);
-  const preview = pf.cuisines.length ? pf.cuisines.map((c, i) => `${counts[i]} ${c}`).filter((s) => !s.startsWith('0 ')).join(' + ') : `${y.best} Quick High-Protein`;
-  return `<details class="card pf" data-toggle="pf" ${UI.pfOpen ? 'open' : ''}>
-    <summary><span class="pf-title"><h2>Protein-First</h2><span class="hint">Start from what you bought</span></span></summary>
-    <div class="pf-body">
-      <div class="form-grid">
-        <label>Protein<select data-change="pfProtein">${proteins.map((p) => `<option value="${p}" ${p === pf.protein ? 'selected' : ''}>${esc(name(p))}</option>`).join('')}</select></label>
-        <label>Raw weight (g)<input type="number" inputmode="numeric" min="100" step="50" value="${pf.grams}" data-change="pfGrams"></label>
-      </div>
-      <div class="yield"><b>${y.best} portions</b><small>${y.low}–${y.high} portions at 140–150 g raw · ${Math.round(y.perServing)} g raw each</small></div>
-      <div><h3 class="label">Slot</h3>${seg('pfSlot', [['Lunch', 'Lunch'], ['Dinner', 'Dinner']], pf.slot)}</div>
-      <div><h3 class="label">Spread across cuisines</h3>
-      <div class="chips">${E.listBatchCuisines().map((cu) => `<button type="button" class="chip ${pf.cuisines.includes(cu) ? 'on' : ''}" data-act="pfCuisine" data-v="${esc(cu)}">${esc(cu)}</button>`).join('')}</div></div>
-      <button type="button" class="btn btn-primary" data-act="pfGo" ${y.best ? '' : 'disabled'}>Add ${esc(preview)}</button>
-    </div>
-  </details>`;
+  const daysOf = (id) => (S.cart.blocks.find((b) => b.id === id)?.days || []);
+  const rows = E.listMealSlots().flatMap((slot) => plan.blocks.filter((b) => b.slot === slot));
+  return `<section class="card">
+    <div class="card-head"><h2>This week's rotation</h2><span class="hint">${plan.blocks.length} dish${plan.blocks.length === 1 ? '' : 'es'}</span></div>
+    ${rows.map((b) => {
+      const tmpl = b.options.filter((o) => o.kind !== 'recipe');
+      const recs = b.options.filter((o) => o.kind === 'recipe');
+      const opt = (o) => `<option value="${esc(o.key)}" ${o.key === b.choice ? 'selected' : ''}>${esc(o.label)}${o.storage ? ` · ${E.getStorageTag(o.storage).label}` : ''}${o.custom ? ' · mine' : ''}</option>`;
+      const days = daysOf(b.id);
+      return `<div class="block-row">
+        <div class="br-head"><span class="br-emoji">${b.emoji}</span><span class="br-title"><b>${SLOT_ICON[b.slot]} ${esc(b.slot)} × ${b.count}</b><small>${esc(b.cuisine)}${days.length ? ` · Day ${days.join(', ')}` : ''}</small></span></div>
+        <select data-change="blockChoice" data-id="${b.id}" aria-label="Dish for ${esc(b.slot)}">
+          <optgroup label="${b.slot === 'Breakfast' ? 'Breakfast bases' : 'Flavor kits + master protein'}">${tmpl.map(opt).join('')}</optgroup>
+          ${recs.length ? `<optgroup label="Full recipes">${recs.map(opt).join('')}</optgroup>` : ''}
+        </select>
+        ${b.kind === 'kit' ? `<select data-change="blockProtein" data-id="${b.id}" aria-label="Protein">${proteins.map((p) => `<option value="${p}" ${p === b.protein ? 'selected' : ''}>${esc(name(p))}</option>`).join('')}</select>` : ''}
+        <div class="br-foot">${macroLine(b.macros)}${storageBadge(b.storage)}</div>
+      </div>`;
+    }).join('')}
+    ${plan.masters.length ? `<h3 class="label">Cooked once</h3>${plan.masters.map((m) => `<div class="master">
+      <span class="master-emoji">${m.emoji}</span>
+      <div class="master-body">
+        <b>${esc(E.formatAmount(m.protein, m.rawTotal))} ${esc(short(m.protein))} → ${m.count} portions</b>
+        <small>${Math.round(m.rawPerServing)} g raw · ≈${Math.round(m.cookedPerServing)} g cooked per box · ${APP_LABEL[m.app]} (${esc(m.methodLabel)})</small>
+        <p class="micro">${esc(m.tip)}</p>
+      </div></div>`).join('')}` : ''}
+  </section>`;
 }
 
-function cartCard(plan) {
-  const c = S.cart;
-  if (!c.blocks.length) {
-    return `<section class="card"><div class="card-head"><h2>Your batch cart</h2></div>
-      <div class="empty small">Empty. Add a block above, for example <b>3 × Lunch (Japanese)</b> + <b>2 × Dinner (Turkish)</b> + <b>4 × Breakfast (Spanish)</b>.</div></section>`;
-  }
-  const byId = Object.fromEntries(plan.blocks.map((b) => [b.id, b]));
-  const proteins = E.masterProteins(S.settings);
-  const methods = E.masterMethodOptions(S.settings);
-  let h = `<section class="card"><div class="card-head"><h2>Your batch cart</h2><button type="button" class="link" data-act="clearCart">Clear</button></div>`;
-  h += c.blocks.map((b) => {
-    const pb = byId[b.id];
-    const head = (emoji, count) => `<div class="br-head"><span class="br-emoji">${emoji}</span><span class="br-title"><b>${count} × ${esc(b.slot)}</b><small>${SLOT_ICON[b.slot]} ${esc(b.cuisine)}</small></span>
-      <button type="button" class="icon-btn subtle" data-act="removeBlock" data-id="${b.id}" aria-label="Remove block">${I.trash}</button></div>`;
-    if (!pb) return `<div class="block-row muted">${head('⚠️', b.count)}<p class="micro">No option fits your rules, so this block is skipped.</p></div>`;
-    const tmpl = pb.options.filter((o) => o.kind !== 'recipe');
-    const recs = pb.options.filter((o) => o.kind === 'recipe');
-    const opt = (o) => `<option value="${esc(o.key)}" ${o.key === pb.choice ? 'selected' : ''}>${esc(o.label)}${o.storage ? ` · ${E.getStorageTag(o.storage).label}` : ''}${o.custom ? ' · imported' : ''}</option>`;
-    return `<div class="block-row">
-      ${head(pb.emoji, pb.count)}
-      <select data-change="blockChoice" data-id="${b.id}" aria-label="Flavor kit or recipe">
-        <optgroup label="${b.slot === 'Breakfast' ? 'Breakfast bases' : 'Flavor kits + master protein'}">${tmpl.map(opt).join('')}</optgroup>
-        ${recs.length ? `<optgroup label="Full recipes">${recs.map(opt).join('')}</optgroup>` : ''}
-      </select>
-      ${pb.kind === 'kit' ? `<select data-change="blockProtein" data-id="${b.id}" aria-label="Protein">${proteins.map((p) => `<option value="${p}" ${p === pb.protein ? 'selected' : ''}>${esc(name(p))}</option>`).join('')}</select>` : ''}
-      <div class="br-foot"><span class="br-meta">${macroLine(pb.macros)}${storageBadge(pb.storage)}</span>${stepperHTML('blockCount', pb.count, { min: pb.count <= 1, max: pb.count >= 10, id: b.id })}</div>
-    </div>`;
-  }).join('');
-  h += `<div class="cart-settings">
-    <div class="row-between"><div><h3 class="label">Raw protein per serving</h3><small class="micro">Proteins with Protein-First grams use those instead</small></div>
-      ${stepperHTML('raw', `${c.rawPerServing} g`, { min: c.rawPerServing <= 100, max: c.rawPerServing >= 220 })}</div>
-    <div><h3 class="label">Master cook method</h3>${seg('method', [['auto', 'Auto'], ...methods.map((m) => [m.id, m.label])], c.method)}</div>
-  </div>`;
-  if (plan.warnings.length) h += `<div class="alert"><div class="alert-head">${I.warn}<b>Heads up</b></div><ul>${plan.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></div>`;
-  return `${h}</section>`;
-}
-
-function mastersCard(plan) {
-  let h = `<section class="card"><div class="card-head"><h2>Master cooks & flavor kits</h2><span class="hint">Cook once, flavor many</span></div>`;
-  h += plan.masters.map((m) => `<div class="master">
-    <span class="master-emoji">${m.emoji}</span>
-    <div class="master-body">
-      <b>${esc(E.formatAmount(m.protein, m.rawTotal))} ${esc(short(m.protein))} → ${m.count} portion${m.count > 1 ? 's' : ''}</b>
-      <small>${Math.round(m.rawPerServing)} g raw · ≈${Math.round(m.cookedPerServing)} g cooked per box · ${APP_LABEL[m.app]} (${esc(m.methodLabel)})</small>
-      <small>Neutral seasoning: ${esc(m.seasoning.filter((e) => e.id !== 'chicken_broth').map((e) => `${E.formatAmount(e.id, e.g)} ${short(e.id)}`).join(', '))}</small>
-      <p class="micro">${esc(m.tip)}</p>
-      ${m.fromGrams ? `<button type="button" class="link small left" data-act="clearPG" data-id="${m.protein}">Using Protein-First grams · switch to ${S.cart.rawPerServing} g per serving</button>` : ''}
-    </div></div>`).join('');
-  if (plan.kits.length) {
-    h += `<h3 class="label">Kits & bases</h3><ul class="kits">${plan.kits.map((k) => `<li>
-      <span class="kit-emoji">${k.emoji}</span>
-      <div><b>${esc(k.name)}</b> <small>× ${k.count}</small><div class="box-tags">${storageBadge(k.storage)}${k.saucePerBox && k.storage ? `<small>${Math.round(k.saucePerBox)} g ${esc(k.sauceName)} per box</small>` : ''}</div></div>
-    </li>`).join('')}</ul>`;
-  }
-  h += `<div class="legend-tags">
-    <p>${storageBadge('freeze-with')} ${esc(E.getStorageTag('freeze-with').text)}</p>
-    <p>${storageBadge('spoon-after')} ${esc(E.getStorageTag('spoon-after').text)}</p>
-  </div>`;
-  return `${h}</section>`;
-}
-
-function containersCard(plan) {
-  const days = {};
-  plan.containers.forEach((c) => { (days[c.day] = days[c.day] || []).push(c); });
-  let h = `<section class="card"><div class="card-head"><h2>Containers</h2><span class="hint">${plan.totals.fridge} fridge · ${plan.totals.freezer} freezer</span></div>
-    <p class="micro">Days 1–4 go in the <b>fridge</b>, Day 5 onwards in the <b>freezer</b>. Each slot counts its own days, so Day 3 = 3rd breakfast, 3rd lunch and 3rd dinner.</p>`;
-  Object.keys(days).map(Number).sort((a, b) => a - b).forEach((d) => {
-    const where = d <= 4 ? 'fridge' : 'freezer';
-    h += `<div class="day-group"><div class="dg-head"><b>Day ${d}</b>${where === 'fridge' ? `<span class="badge badge-fridge">${I.fridge}Fridge · Days 1–4</span>` : `<span class="badge badge-ice">${I.snow}Freezer · Day 5+</span>`}</div>
-      ${days[d].map(containerRow).join('')}</div>`;
-  });
-  return `${h}</section>`;
+function scheduleCard(plan) {
+  return `<section class="card">
+    <div class="card-head"><h2>7-day schedule</h2><span class="hint">${plan.totals.fridge} fridge · ${plan.totals.freezer} freezer</span></div>
+    ${plan.days.map((d) => `<div class="day-group">
+      <div class="dg-head"><b>Day ${d.day}</b>${d.where === 'fridge' ? `<span class="badge badge-fridge">${I.fridge}Fridge</span>` : `<span class="badge badge-ice">${I.snow}Freezer</span>`}<span class="dg-total"><b>${Math.round(d.macros.p)} g P</b> · ${r0(d.macros.kcal)} kcal</span></div>
+      ${E.listMealSlots().map((slot) => {
+        const c = d.containers.find((x) => x.slot === slot);
+        return c ? containerRow(c) : `<div class="box box-empty"><small class="box-slot">${SLOT_ICON[slot]} ${esc(slot)}</small><small>Not planned</small></div>`;
+      }).join('')}
+    </div>`).join('')}
+  </section>`;
 }
 
 function containerRow(c) {
@@ -405,7 +395,6 @@ function containerRow(c) {
       <div class="box-text">
         <small class="box-slot">${SLOT_ICON[c.slot]} ${esc(c.slot)} · ${esc(c.cuisine)}</small>
         <b>${esc(c.name)}</b>
-        <small>${esc(c.subtitle)}</small>
         ${macroLine(c.macros)}
         <div class="box-tags">${whereBadge(c.where)}${storageBadge(c.storage)}</div>
       </div>
@@ -415,38 +404,56 @@ function containerRow(c) {
   </div>`;
 }
 
-function groceryCard(plan) {
-  const bought = new Set(S.cart.bought);
-  return `<section class="card"><div class="card-head"><h2>Shopping list</h2><button type="button" class="link" data-act="copyGrocery">Copy</button></div>
-    <p class="micro">Raw amounts summed across all ${plan.totals.containers} boxes: proteins, eggs, carbs, vegetables and every sauce ingredient. Tap to tick off.</p>
-    ${plan.grocery.map((grp) => `<div><h3 class="label">${esc(grp.group)}</h3><ul class="grocery">${grp.items.map((i) => `<li><button type="button" class="gitem ${bought.has(i.id) ? 'done' : ''}" data-act="buy" data-id="${i.id}" aria-pressed="${bought.has(i.id)}">
-      <span class="gcheck">${bought.has(i.id) ? I.check : ''}</span><span class="gname">${esc(name(i.id))}${i.inPantry ? ' <small>pantry</small>' : ''}</span><span class="gamt">${esc(i.amount)}</span></button></li>`).join('')}</ul></div>`).join('')}
-  </section>`;
-}
-
-function timelineCard(tl) {
+function sessionCard(plan, tl) {
   const jobs = [];
   tl.tasks.forEach((t) => { if (!jobs[t.job]) jobs[t.job] = `${t.emoji} ${t.recipeName}`; });
+  const taskLi = (t) => `<li class="${SESSION_COLORS[t.job % 5]}">
+      <time>${E.clockLabel(t.start)}</time>
+      <div class="tl-body">
+        <div class="tl-head"><span class="dot"></span><b>${t.emoji} ${esc(t.recipeName)}</b><span class="app app-${t.app}">${APP_ICON[t.app]}${APP_LABEL[t.app]}</span></div>
+        <p>${segmentsHTML(t.segments)}</p>
+        <small>${t.a ? `${t.a} min hands-on` : ''}${t.a && t.p ? ' · ' : ''}${t.p ? `then ${t.p} min hands-off` : ''}${t.rounds > 1 ? ` · ${t.rounds} rounds` : ''}${t.adaptedFrom ? ` · adapted from ${APP_LABEL[t.adaptedFrom]}` : ''}</small>
+      </div>
+    </li>`;
+  const phaseHTML = PHASES.map((ph) => {
+    const tasks = tl.tasks.filter((t) => (t.phase || 2) === ph.id);
+    if (!tasks.length) return '';
+    return `<div class="phase"><div class="phase-head"><b>${esc(ph.title)}</b><small>${esc(ph.text)} Starts at ${E.clockLabel(tasks[0].start)}.</small></div>
+      <ol class="timeline">${tasks.map(taskLi).join('')}</ol></div>`;
+  }).join('');
+
+  const fridge = plan.containers.filter((c) => c.where === 'fridge');
+  const freezer = plan.containers.filter((c) => c.where !== 'fridge');
+  const label = (c) => `<li><span class="lbl">Day ${c.day} · ${esc(c.slot)}</span><span>${c.emoji} ${esc(c.name)}${c.storage === 'spoon-after' ? ` <small>+ ${esc(c.sauceName)} pot</small>` : ''}</span></li>`;
+  const spoon = plan.kits.filter((k) => k.storage === 'spoon-after');
   return `<section class="card">
-    <div class="card-head"><h2>Parallel cooking timeline</h2><span class="hint">Instant Pot · Air Fryer · Stovetop</span></div>
+    <div class="card-head"><h2>One cooking session</h2><span class="hint">All 21 meals together</span></div>
     <div class="tiles tiles-3">
       <div class="tile"><b>${E.formatMinutes(tl.makespan)}</b><span>Whole session</span></div>
       <div class="tile"><b>${E.formatMinutes(tl.activeTotal)}</b><span>Hands-on</span></div>
-      <div class="tile tile-p"><b>${E.formatMinutes(tl.saved)}</b><span>Saved vs. one by one</span></div>
+      <div class="tile tile-p"><b>${E.formatMinutes(tl.saved)}</b><span>Saved</span></div>
     </div>
-    <div class="chips">${jobs.map((j, i) => (j ? `<span class="pill session-pill ${SESSION_COLORS[i % 5]}"><span class="dot"></span><span class="pill-name">${esc(j)}</span></span>` : '')).join('')}</div>
     ${gantt(tl, jobs)}
-    <ol class="timeline">${tl.tasks.map((t) => `
-      <li class="${SESSION_COLORS[t.job % 5]}">
-        <time>${E.clockLabel(t.start)}</time>
-        <div class="tl-body">
-          <div class="tl-head"><span class="dot"></span><b>${t.emoji} ${esc(t.recipeName)}</b><span class="app app-${t.app}">${APP_ICON[t.app]}${APP_LABEL[t.app]}</span></div>
-          <p>${segmentsHTML(t.segments)}</p>
-          <small>${t.a ? `${t.a} min hands-on` : ''}${t.a && t.p ? ' · ' : ''}${t.p ? `then ${t.p} min hands-off` : ''}${t.rounds > 1 ? ` · ${t.rounds} rounds` : ''}${t.adaptedFrom ? ` · adapted from ${APP_LABEL[t.adaptedFrom]}` : ''}</small>
-        </div>
-      </li>`).join('')}
-      <li class="done"><time>${E.clockLabel(tl.makespan)}</time><div class="tl-body"><b>Pack.</b> Days 1–4 go in the fridge and Day 5+ in the freezer. Spoon-After sauces go in small separate pots.</div></li>
-    </ol>
+    ${phaseHTML}
+    <div class="phase"><div class="phase-head"><b>Phase 3 · Box & store</b><small>From ${E.clockLabel(tl.makespan)}: pack ${plan.containers.length} containers, each labelled by day and meal.</small></div>
+      <div class="store-grid">
+        <div class="store"><div class="store-head"><span class="badge badge-fridge">${I.fridge}Fridge · Days 1–4</span><small>${fridge.length} boxes</small></div><ul class="labels">${fridge.map(label).join('')}</ul></div>
+        <div class="store"><div class="store-head"><span class="badge badge-ice">${I.snow}Freezer · Days 5–7</span><small>${freezer.length} boxes</small></div><ul class="labels">${freezer.map(label).join('')}</ul>
+          ${freezer.length ? '<p class="micro">Move each box to the fridge the evening before you eat it.</p>' : ''}</div>
+      </div>
+      ${spoon.length ? `<p class="micro">${storageBadge('spoon-after')} Keep ${esc(listOf(spoon.map((k) => k.sauceName)))} in small separate pots. Cold and creamy sauces split when reheated or frozen.</p>` : ''}
+    </div>
+  </section>`;
+}
+
+const listOf = (xs) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+
+function groceryCard(plan) {
+  const bought = new Set(S.cart.bought);
+  return `<section class="card"><div class="card-head"><h2>Shopping list</h2><button type="button" class="link" data-act="copyGrocery">Copy</button></div>
+    <p class="micro">Raw amounts summed across all ${plan.totals.containers} meals: proteins, eggs, carbs, vegetables and every sauce ingredient. Tap to tick off.</p>
+    ${plan.grocery.map((grp) => `<div><h3 class="label">${esc(grp.group)}</h3><ul class="grocery">${grp.items.map((i) => `<li><button type="button" class="gitem ${bought.has(i.id) ? 'done' : ''}" data-act="buy" data-id="${i.id}" aria-pressed="${bought.has(i.id)}">
+      <span class="gcheck">${bought.has(i.id) ? I.check : ''}</span><span class="gname">${esc(name(i.id))}${i.inPantry ? ' <small>pantry</small>' : ''}</span><span class="gamt">${esc(i.amount)}</span></button></li>`).join('')}</ul></div>`).join('')}
   </section>`;
 }
 
@@ -478,26 +485,35 @@ function gantt(tl, jobs) {
 }
 
 // ------------------------------------------------------------------------------------------
-// AI CHEF BRIDGE (Tabs 1, 2, 4) + import modal
+// AI CHEF BRIDGE (optional, bottom of Tab 4) + modals: import and Write My Own
 // ------------------------------------------------------------------------------------------
-function aiCard(mode) {
-  const both = mode === 'rules';
-  const text = mode === 'batch'
-    ? 'Copies your cart, protein, pantry staples, rules, and macro targets. Paste it into your AI chat for fresh meal ideas, then paste the reply back here.'
-    : 'Copies your cart, protein, pantry staples, rules, and macro targets. Paste it into your AI chat for fresh meal ideas, then paste the reply back here.';
-  return `<section class="card ai-card">
-    <div class="card-head"><h2>${I.spark} AI Chef Bridge</h2><span class="hint">Gemini Co-Pilot</span></div>
-    <p class="micro">${both ? 'Send your rules and kitchen to any AI chat, then import the recipe or batch plan JSON it replies with.' : text} Paste it into any AI chat, then import its reply here.</p>
-    <div class="btn-row">
-      ${both
-        ? `<button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="recipe">${I.copy}Recipe prompt</button><button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="batch">${I.copy}Batch prompt</button>`
-        : `<button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="${mode}">${I.copy}Copy Prompt for AI Chef</button>`}
+function aiCard() {
+  return `<details class="card advanced" data-toggle="ai" ${UI.aiOpen ? 'open' : ''}>
+    <summary><span class="adv-title"><h2>${I.spark} AI Chef Bridge</h2><span class="hint">Advanced · optional</span></span></summary>
+    <div class="adv-body">
+      <span class="badge badge-hot">${I.spark}Gemini Co-Pilot</span>
+      <p class="micro">Copies your cart, protein, pantry staples, rules, and macro targets. Paste it into your AI chat for fresh meal ideas, then paste the reply back here.</p>
+      <div class="btn-row">
+        <button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="recipe">${I.copy}Recipe prompt</button>
+        <button type="button" class="btn btn-soft" data-act="copyPrompt" data-v="batch">${I.copy}Week prompt</button>
+      </div>
       <button type="button" class="btn btn-primary" data-act="openImport">${I.download}Paste New Plan</button>
     </div>
-  </section>`;
+  </details>`;
 }
 
 function renderModal() {
+  const m = $('#modal');
+  if (UI.modal === 'write') {
+    m.setAttribute('aria-label', 'Write my own recipe');
+    renderWriteModal();
+  } else {
+    m.setAttribute('aria-label', 'Import recipe or batch plan');
+    renderImportModal();
+  }
+}
+
+function renderImportModal() {
   const r = UI.importResult;
   let preview = '';
   if (r) {
@@ -514,34 +530,72 @@ function renderModal() {
     if (r.plan && r.plan.blocks.length) {
       preview += `<h3 class="label">Batch plan (${r.plan.blocks.length} blocks)</h3><ul class="import-list">${r.plan.blocks.map((b) => `<li><span>${SLOT_ICON[b.slot]}</span><div><b>${b.count} × ${esc(b.slot)} (${esc(b.cuisine)})</b><small>${b.protein ? esc(name(b.protein)) : 'Breakfast base'}${b.choice ? ` · ${esc(b.choice.split(':')[1])}` : ''}</small></div></li>`).join('')}</ul>
       ${Object.keys(r.plan.proteinGrams).length ? `<p class="micro">Protein-First: ${esc(Object.entries(r.plan.proteinGrams).map(([p, g]) => `${g} g ${short(p)}`).join(', '))}</p>` : ''}
-      <button type="button" class="switch-row" role="switch" aria-checked="${UI.importReplace}" data-act="importReplace"><span class="sr-text"><b>Replace my current cart</b><small>Off = add these blocks to it</small></span><span class="switch ${UI.importReplace ? 'on' : ''}"><span></span></span></button>`;
+      <button type="button" class="switch-row" role="switch" aria-checked="${UI.importReplace}" data-act="importReplace"><span class="sr-text"><b>Replace my current plan</b><small>Off = add these blocks to it</small></span><span class="switch ${UI.importReplace ? 'on' : ''}"><span></span></span></button>`;
     }
     if (r.warnings.length) preview += `<details class="more inset"><summary>${I.warn} ${r.warnings.length} note${r.warnings.length > 1 ? 's' : ''}</summary><ul class="plain">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></details>`;
   }
   const canSave = r && !r.errors.length && (r.recipes.length || (r.plan && r.plan.blocks.length));
   $('#modalBody').innerHTML = `
-    <header class="modal-head"><h2>Import recipe / batch plan</h2><button type="button" class="icon-btn" data-act="closeImport" aria-label="Close">${I.close}</button></header>
+    <header class="modal-head"><h2>Paste New Plan</h2><button type="button" class="icon-btn" data-act="closeImport" aria-label="Close">${I.close}</button></header>
     <div class="modal-scroll">
-      <p class="micro">Paste the JSON your AI chef replied with. Code fences and chatty text around it are fine. Unknown ingredients are added with the macros the AI provided.</p>
+      <p class="micro">Paste your AI chat's reply. Code fences and chatty text around it are fine. Unknown ingredients are added with the macros the AI provided.</p>
       <textarea data-input="importText" rows="9" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder='{ "type": "recipe", "name": "…", "ingredients": [ … ], "steps": [ … ] }'>${esc(UI.importText)}</textarea>
       <div class="btn-row">
         <button type="button" class="btn btn-soft btn-sm" data-act="pasteImport">Paste</button>
         <button type="button" class="btn btn-soft btn-sm" data-act="copyTemplate" data-v="recipe">Recipe template</button>
         <button type="button" class="btn btn-soft btn-sm" data-act="copyTemplate" data-v="batchPlan">Batch template</button>
       </div>
-      <button type="button" class="btn btn-soft" data-act="checkImport">Check JSON</button>
+      <button type="button" class="btn btn-soft" data-act="checkImport">Check reply</button>
       ${preview}
     </div>
     <footer class="modal-foot"><button type="button" class="btn btn-primary btn-lg" data-act="saveImport" ${canSave ? '' : 'disabled'}>${I.check}Save to my app</button></footer>`;
 }
 
-function openImport() {
-  UI.importResult = UI.importText ? E.parseImport(UI.importText) : null;
+function renderWriteModal() {
+  const d = UI.draft || (UI.draft = emptyDraft());
+  const ingNames = Object.keys(INGREDIENTS).filter((id) => !['basic', 'leftover'].includes(INGREDIENTS[id].cat)).map((id) => INGREDIENTS[id].name);
+  const sel = (key, opts, cur) => `<select data-draft="${key}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  $('#modalBody').innerHTML = `
+    <header class="modal-head"><h2>Write my own recipe</h2><button type="button" class="icon-btn" data-act="closeImport" aria-label="Close">${I.close}</button></header>
+    <div class="modal-scroll">
+      <label class="field"><span class="label">Title</span><input type="text" data-draft="title" value="${esc(d.title)}" placeholder="e.g. Lemon-herb chicken traybake" autocomplete="off"></label>
+      <div class="form-grid">
+        <label>Cuisine${sel('cuisine', E.listGenCuisines().map((c) => [c, c]), d.cuisine)}</label>
+        <label>Meal slot${sel('slot', [['', 'Any'], ...E.listMealSlots().map((x) => [x, x])], d.slot)}</label>
+      </div>
+      <div class="form-grid three">
+        <label>Servings<input type="number" inputmode="numeric" min="1" max="12" data-draft="servings" value="${esc(d.servings)}"></label>
+        <label>Active min<input type="number" inputmode="numeric" min="0" data-draft="active" value="${esc(d.active)}"></label>
+        <label>Passive min<input type="number" inputmode="numeric" min="0" data-draft="passive" value="${esc(d.passive)}"></label>
+      </div>
+      <div class="field"><h3 class="label">Ingredients</h3>
+        <div class="ing-rows">${d.ings.map((ing, i) => `<div class="ing-row">
+          <input type="text" list="ingNames" data-draft-ing="${i}" data-k="name" value="${esc(ing.name)}" placeholder="Ingredient" aria-label="Ingredient ${i + 1}" autocomplete="off">
+          <input type="number" inputmode="decimal" min="0" step="any" data-draft-ing="${i}" data-k="amt" value="${esc(ing.amt)}" placeholder="0" aria-label="Amount">
+          <select data-draft-ing="${i}" data-k="unit" aria-label="Unit">${['g', 'ml', 'pcs'].map((u) => `<option ${ing.unit === u ? 'selected' : ''}>${u}</option>`).join('')}</select>
+          <button type="button" class="icon-btn subtle" data-act="woDelIng" data-i="${i}" aria-label="Remove ingredient" ${d.ings.length <= 1 ? 'disabled' : ''}>${I.trash}</button>
+        </div>`).join('')}</div>
+        <datalist id="ingNames">${ingNames.map((n) => `<option value="${esc(n)}"></option>`).join('')}</datalist>
+        <button type="button" class="btn btn-soft btn-sm" data-act="woAddIng">${I.plus}Add ingredient</button>
+        <p class="micro">Names from the list get exact macros. Anything else is saved too, at 0 kcal.</p>
+      </div>
+      <label class="field"><span class="label">Steps · one per line</span><textarea class="plain" data-draft="steps" rows="6" placeholder="Pat the chicken dry and season it.&#10;Air fry at 190 °C for 15 min.&#10;Rest 5 min, then slice.">${esc(d.steps)}</textarea></label>
+      <label class="field"><span class="label">Michelin tip <small>(optional)</small></span><textarea class="plain short" data-draft="tip" rows="2" placeholder="e.g. Rest the meat on a rack so the crust stays crisp.">${esc(d.tip)}</textarea></label>
+      ${UI.draftErrors.length ? `<div class="alert alert-danger"><div class="alert-head">${I.warn}<b>Almost there</b></div><ul>${UI.draftErrors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>` : ''}
+    </div>
+    <footer class="modal-foot"><button type="button" class="btn btn-primary btn-lg" data-act="saveWrite">${I.check}Save to My Recipes</button></footer>`;
+}
+
+function openModal(kind) {
+  UI.modal = kind;
+  if (kind === 'import') UI.importResult = UI.importText ? E.parseImport(UI.importText) : null;
   renderModal();
   const m = $('#modal');
   m.hidden = false;
   requestAnimationFrame(() => { m.classList.add('open'); document.documentElement.classList.add('sheet-open'); });
+  $('.modal-scroll', m).scrollTop = 0;
 }
+const openImport = () => openModal('import');
 
 function closeImport() {
   const m = $('#modal');
@@ -701,6 +755,15 @@ function renderRules() {
       return `<button type="button" class="chip toggle ${st.pantry[id] ? 'on' : ''} ${blocked ? 'blocked' : ''}" data-act="pantry" data-id="${id}" aria-pressed="${!!st.pantry[id]}">${st.pantry[id] ? I.check : ''}${esc(name(id))}</button>`;
     }).join('')}</div></div>`;
   });
+  h += `<div class="chip-group"><h3>My staples</h3>
+    ${S.customPantry.length ? `<div class="chips">${S.customPantry.map((x) => `<span class="chip-pair ${st.pantry[x.id] ? 'on' : ''} ${E.blockReason(x.id, st) ? 'blocked' : ''}">
+      <button type="button" class="chip toggle ${st.pantry[x.id] ? 'on' : ''}" data-act="pantry" data-id="${esc(x.id)}" aria-pressed="${!!st.pantry[x.id]}">${st.pantry[x.id] ? I.check : ''}${esc(x.name)}</button>
+      <button type="button" class="chip-x" data-act="delPantry" data-id="${esc(x.id)}" aria-label="Delete ${esc(x.name)}">${I.close}</button></span>`).join('')}</div>` : '<p class="micro">Add anything you always keep in, like za\'atar, coconut aminos or pomegranate molasses.</p>'}
+    <form class="inline-form" data-form="pantryAdd">
+      <input name="item" type="text" placeholder="Add a pantry staple…" autocomplete="off" enterkeyhint="done" aria-label="New pantry staple">
+      <button type="submit" class="btn btn-primary">${I.plus}<span>Add</span></button>
+    </form>
+  </div>`;
   const traps = allIds.filter((id) => INGREDIENTS[id].glutenNote && (INGREDIENTS[id].cat === 'pantry' || INGREDIENTS[id].cat === 'fresh'));
   if (st.locks.glutenFree) {
     h += `<details class="more inset"><summary>${I.warn} Gluten traps to check on labels <span class="count">${traps.length}</span></summary>
@@ -731,16 +794,17 @@ function renderRules() {
     ${APPLIANCES.map((a) => switchRow('appliance', a.id, a.label, st.appliances[a.id], applianceHint(a.id), APP_ICON[a.id])).join('')}
   </section>`;
 
-  h += aiCard('rules');
   const customs = S.customRecipes;
+  const kindOf = (r) => (r.written ? 'Written by you' : r.generated ? "Chef's creation" : 'Imported');
   h += `<section class="card">
-    <div class="card-head"><h2>Imported recipes</h2><span class="hint">${customs.length}</span></div>
+    <div class="card-head"><h2>My recipes</h2><span class="hint">${customs.length}</span></div>
     ${customs.length ? `<ul class="log">${customs.map((r) => {
       const chk = E.importCheck(r, st);
-      return `<li><div><b>${r.emoji} ${esc(r.name)}</b><small>${esc(r.cuisine)}${r.slot ? ` · ${r.slot}` : ''} · ${r.servings} servings${chk.hidden ? ' · hidden by your rules' : ''}</small></div>
+      return `<li><div><b>${r.emoji} ${esc(r.name)}</b><small>${esc(kindOf(r))} · ${esc(r.cuisine)}${r.slot ? ` · ${r.slot}` : ''} · ${r.servings} servings${chk.hidden ? ' · hidden by your rules' : ''}</small></div>
         <button type="button" class="btn btn-soft btn-sm" data-act="openCustom" data-id="${esc(r.id)}">Open</button>
         <button type="button" class="icon-btn subtle" data-act="delCustom" data-id="${esc(r.id)}" aria-label="Delete">${I.trash}</button></li>`;
-    }).join('')}</ul>` : '<div class="empty small">Recipes you import from your AI chef show up here, in Quick Cook, and as full-recipe options in Batch Prep.</div>'}
+    }).join('')}</ul>` : '<div class="empty small">Recipes you write, generate in Quick Cook or import show up here, in Quick Cook, and in the 7-day planner.</div>'}
+    <button type="button" class="btn btn-soft" data-act="openWrite">${I.plus}Write My Own Recipe</button>
   </section>`;
 
   h += `<section class="card">
@@ -751,6 +815,7 @@ function renderRules() {
       <button type="button" class="btn btn-danger" data-act="reset">Reset</button>
     </div>
   </section>`;
+  h += aiCard();
   return h;
 }
 
@@ -812,6 +877,7 @@ function openDetail(id, { context = 'quick', servings, swap } = {}) {
 }
 
 function closeDetail() {
+  if (UI.detail && isDraft(UI.detail.id)) E.setDraftRecipe(null);
   const sheet = $('#sheet');
   sheet.classList.remove('open');
   document.documentElement.classList.remove('sheet-open');
@@ -842,8 +908,12 @@ function renderDetail() {
   <div class="hero"><span class="hero-emoji">${res.emoji}</span>
     <h2>${esc(res.name)}</h2>
     <p>${esc(res.blurb)}</p>
-    <div class="meta center"><span>${esc(res.moods.join(' · '))}</span></div>
+    <div class="meta center"><span>${esc(res.moods.join(' · '))}</span>${res.slot ? `<span>${SLOT_ICON[res.slot] || ''} ${esc(res.slot)}</span>` : ''}</div>
+    ${isDraft(d.id) ? `<span class="badge badge-hot">${I.spark}Chef's creation · not saved yet</span>`
+      : raw.custom ? `<span class="badge badge-fridge">${I.check}In My Recipes</span>` : ''}
   </div>
+  ${isDraft(d.id) ? `${UI.genNotes.length ? `<div class="notice"><ul>${UI.genNotes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></div>` : ''}
+  <div class="btn-row"><button type="button" class="btn btn-soft" data-act="remixRecipe">${I.swap}Try another</button><button type="button" class="btn btn-primary" data-act="saveDraft">${I.check}Save to My Recipes</button></div>` : ''}
   ${res.hidden ? `<div class="alert">${I.warn}<b>Not compatible with your rules:</b> ${esc(res.hiddenReasons.join(', '))}</div>` : ''}
 
   <div class="times">
@@ -1017,7 +1087,7 @@ function logRecipe(id, { container = false, size = 1 } = {}) {
 // ------------------------------------------------------------------------------------------
 const TABS = {
   quick: { title: 'Quick Cook', sub: 'Cook one meal from what\'s in the fridge', render: renderQuick },
-  batch: { title: 'Batch Cart', sub: 'Master proteins, flavor kits and any mix of days', render: renderBatch },
+  batch: { title: '7-Day Planner', sub: '21 meals, one prep session', render: renderBatch },
   macros: { title: 'Macros & Weight', sub: 'Protein first, everything else follows', render: renderMacros },
   rules: { title: 'Rules & Pantry', sub: 'Set once, applied everywhere', render: renderRules },
 };
@@ -1039,6 +1109,35 @@ function render() {
 // Actions (event delegation)
 // ------------------------------------------------------------------------------------------
 const toggleIn = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
+
+function generateDraft() {
+  const out = E.generateFridgeRecipe({ settings: S.settings, fridge: S.fridge, cuisine: S.fridge.genCuisine, servings: 2, variant: UI.genVariant, now: Date.now() });
+  if (out.error) { toast(out.error); return; }
+  E.setDraftRecipe(out.recipe);
+  UI.genNotes = [...out.notes, ...(out.unused.length ? [`Not used this time: ${out.unused.map((id) => short(id)).join(', ')}. Tap Try another for a different combination.`] : [])];
+  if (UI.detail) {
+    UI.detail.id = out.recipe.id;
+    UI.detail.servings = out.recipe.servings;
+    UI.detail.sauceId = out.recipe.sauceId || UI.detail.sauceId;
+    renderDetail();
+    $('#sheetBody').scrollTop = 0;
+  } else {
+    openDetail(out.recipe.id, { context: 'quick', servings: out.recipe.servings });
+  }
+}
+
+const weekKey = (w) => JSON.stringify({ ...w, seed: undefined });
+
+function buildWeek(shuffle) {
+  const w = S.cart.week;
+  if (shuffle) w.seed = (Number(w.seed) || 0) + 1;
+  const { blocks, warnings } = E.generateWeek(w, S.settings, S.recipePrefs);
+  const prev = JSON.parse(JSON.stringify(S.cart));
+  S.cart = { ...S.cart, blocks, proteinGrams: {}, eaten: [], eatenLog: {}, bought: [], genWarnings: warnings, genFrom: weekKey(w) };
+  persist('cart'); render();
+  const meals = blocks.reduce((n, b) => n + b.count, 0);
+  toast(meals ? `Planned ${meals} meals across 7 days` : (warnings[0] || 'Nothing fits your rules'), prev.blocks.length ? () => { S.cart = prev; persist('cart'); render(); } : undefined);
+}
 
 const actions = {
   tab(el) { UI.tab = el.dataset.v; render(); window.scrollTo({ top: 0 }); },
@@ -1075,6 +1174,40 @@ const actions = {
   mood(el) { S.fridge.mood = el.dataset.v; persist('fridge'); render(); },
   resTab(el) { S.fridge.missingOne = el.dataset.v === 'missing'; persist('fridge'); render(); },
   open(el) { openDetail(el.dataset.id, { context: 'quick', swap: el.dataset.swap }); },
+  genCuisine(el) { S.fridge.genCuisine = el.dataset.v; UI.genVariant = 0; persist('fridge'); render(); },
+  genRecipe() { UI.genVariant = 0; generateDraft(); },
+  remixRecipe() { UI.genVariant += 1; generateDraft(); },
+  saveDraft() {
+    const r = E.draftRecipe();
+    if (!r) return;
+    S.customRecipes = [...S.customRecipes.filter((x) => x.id !== r.id), { ...r, savedAt: Date.now() }];
+    E.setDraftRecipe(null);
+    syncCustom();
+    persist('customRecipes');
+    renderDetail();
+    toast(`Saved "${r.name}" to My Recipes`);
+  },
+  openWrite() { if (!UI.draft) UI.draft = emptyDraft(); UI.draftErrors = []; openModal('write'); },
+  woAddIng() {
+    UI.draft.ings.push({ name: '', amt: '', unit: 'g' });
+    renderModal();
+    const rows = document.querySelectorAll('.ing-row input[data-k="name"]');
+    if (rows.length) rows[rows.length - 1].focus();
+  },
+  woDelIng(el) { UI.draft.ings.splice(Number(el.dataset.i), 1); if (!UI.draft.ings.length) UI.draft.ings.push({ name: '', amt: '', unit: 'g' }); renderModal(); },
+  saveWrite() {
+    const out = E.createUserRecipe(UI.draft);
+    if (out.errors.length || !out.recipe) { UI.draftErrors = out.errors; renderModal(); $('#modal .modal-scroll').scrollTop = 1e6; return; }
+    S.customRecipes = [...S.customRecipes, out.recipe];
+    syncCustom();
+    persist('customRecipes');
+    UI.draft = null;
+    UI.draftErrors = [];
+    closeImport();
+    render();
+    openDetail(out.recipe.id, { context: 'quick' });
+    toast(out.warnings.length ? `Saved. ${out.warnings[0]}` : `Saved "${out.recipe.name}" to My Recipes`);
+  },
 
 
   // Macros
@@ -1118,6 +1251,15 @@ const actions = {
     S.settings.appliances = next; persist('settings'); render();
   },
   unblock(el) { S.settings.blocklist.splice(Number(el.dataset.i), 1); persist('settings'); render(); },
+  delPantry(el) {
+    const id = el.dataset.id;
+    const prev = { list: S.customPantry, on: S.settings.pantry[id] };
+    const item = S.customPantry.find((x) => x.id === id);
+    S.customPantry = S.customPantry.filter((x) => x.id !== id);
+    delete S.settings.pantry[id];
+    syncCustom(); persist('customPantry', 'settings'); render();
+    toast(`Removed ${item ? item.name : 'staple'}`, () => { S.customPantry = prev.list; S.settings.pantry[id] = prev.on; syncCustom(); persist('customPantry', 'settings'); render(); });
+  },
   export() {
     const data = Object.fromEntries(PERSISTED.map((k) => [k, S[k]]));
     const blob = new Blob([JSON.stringify({ app: 'mise', version: 1, exported: new Date().toISOString(), data }, null, 2)], { type: 'application/json' });
@@ -1131,7 +1273,8 @@ const actions = {
     if (!confirm('Reset everything? This deletes your logs, weights and settings on this device.')) return;
     await store.clearAll();
     S = E.defaultUserData();
-    E.setCustomData([]);
+    E.setDraftRecipe(null);
+    syncCustom();
     render();
     toast('All data reset');
   },
@@ -1141,7 +1284,7 @@ const actions = {
   serv(el) {
     const d = UI.detail;
     d.servings = Math.min(21, Math.max(1, d.servings + Number(el.dataset.d)));
-    if (d.context === 'quick') { prefs(d.id).servings = d.servings; persist('recipePrefs'); }
+    if (d.context === 'quick' && !isDraft(d.id)) { prefs(d.id).servings = d.servings; persist('recipePrefs'); }
     renderDetail();
   },
   swap(el) { prefs(UI.detail.id).swaps[el.dataset.from] = el.dataset.key; persist('recipePrefs'); renderDetail(); },
@@ -1157,48 +1300,23 @@ const actions = {
     const d = UI.detail;
     logRecipe(d.id);
   },
-  // Batch cart
-  bCount(el) { const b = S.cart.builder; b.count = Math.min(10, Math.max(1, b.count + Number(el.dataset.d))); persist('cart'); render(); },
-  bSlot(el) { S.cart.builder.slot = el.dataset.v; persist('cart'); render(); },
-  bCuisine(el) { S.cart.builder.cuisine = el.dataset.v; persist('cart'); render(); },
-  addBlock() {
-    const b = S.cart.builder;
-    const block = E.makeBlock(b, S.settings);
-    if (!block.choice) { toast(`No ${b.slot.toLowerCase()} option for ${b.cuisine} fits your rules`); return; }
-    S.cart.blocks.push(block);
-    persist('cart'); render();
-    toast(`Added ${b.count} × ${b.slot} (${b.cuisine})`, () => { S.cart.blocks = S.cart.blocks.filter((x) => x.id !== block.id); persist('cart'); render(); });
-  },
-  pfSlot(el) { S.cart.pf.slot = el.dataset.v; persist('cart'); render(); },
-  pfCuisine(el) { S.cart.pf.cuisines = toggleIn(S.cart.pf.cuisines, el.dataset.v); persist('cart'); render(); },
-  pfGo() {
-    const pf = S.cart.pf;
-    const { blocks, yield: y } = E.proteinFirstBlocks(pf, S.settings);
-    if (!blocks.length) return;
-    const prev = JSON.parse(JSON.stringify(S.cart));
-    S.cart.blocks.push(...blocks);
-    S.cart.proteinGrams = { ...S.cart.proteinGrams, [pf.protein]: Number(pf.grams) };
-    persist('cart'); render();
-    toast(`${pf.grams} g ${short(pf.protein)} → ${y.best} portions added`, () => { S.cart = prev; persist('cart'); render(); });
-  },
-  clearPG(el) { const pg = { ...S.cart.proteinGrams }; delete pg[el.dataset.id]; S.cart.proteinGrams = pg; persist('cart'); render(); },
-  blockCount(el) {
-    const b = S.cart.blocks.find((x) => x.id === el.dataset.id);
-    if (!b) return;
-    b.count = Math.min(10, Math.max(1, b.count + Number(el.dataset.d)));
+  // 7-day planner
+  wBreakfast(el) { S.cart.week.breakfastVariety = Number(el.dataset.v); persist('cart'); render(); },
+  wMode(el) { S.cart.week.mainMode = el.dataset.v; persist('cart'); render(); },
+  wDishes(el) { S.cart.week.dishesPerSlot = Number(el.dataset.v); persist('cart'); render(); },
+  wCuisine(el) {
+    const next = toggleIn(S.cart.week.cuisines, el.dataset.v);
+    if (!next.length) { toast('Keep at least one cuisine'); return; }
+    S.cart.week.cuisines = E.listBatchCuisines().filter((c) => next.includes(c));
     persist('cart'); render();
   },
-  removeBlock(el) {
-    const prev = S.cart.blocks;
-    S.cart.blocks = prev.filter((x) => x.id !== el.dataset.id);
-    persist('cart'); render();
-    toast('Block removed', () => { S.cart.blocks = prev; persist('cart'); render(); });
-  },
+  genWeek() { buildWeek(false); },
+  shuffleWeek() { buildWeek(true); },
   clearCart() {
     const prev = JSON.parse(JSON.stringify(S.cart));
-    S.cart = { ...S.cart, blocks: [], proteinGrams: {}, eaten: [], eatenLog: {}, bought: [] };
+    S.cart = { ...S.cart, blocks: [], proteinGrams: {}, eaten: [], eatenLog: {}, bought: [], genWarnings: [], genFrom: null };
     persist('cart'); render();
-    toast('Cart cleared', () => { S.cart = prev; persist('cart'); render(); });
+    toast('Plan cleared', () => { S.cart = prev; persist('cart'); render(); });
   },
   raw(el) { S.cart.rawPerServing = Math.min(220, Math.max(100, S.cart.rawPerServing + 5 * Number(el.dataset.d))); persist('cart'); render(); },
   method(el) { S.cart.method = el.dataset.v; persist('cart'); render(); },
@@ -1232,7 +1350,7 @@ const actions = {
   buy(el) { S.cart.bought = toggleIn(S.cart.bought, el.dataset.id); persist('cart'); render(); },
   async copyGrocery() {
     const plan = E.planCart(S.cart, S.settings, S.recipePrefs);
-    const ok = await copyText(`Mise shopping list (${plan.totals.containers} boxes)\n\n${E.groceryText(plan.grocery)}`);
+    const ok = await copyText(`Mise shopping list (${plan.totals.containers} meals)\n\n${E.groceryText(plan.grocery)}`);
     toast(ok ? 'Shopping list copied' : 'Copy failed. Long-press to select instead.');
   },
 
@@ -1243,7 +1361,7 @@ const actions = {
     const ok = await copyText(prompt);
     toast(ok ? 'Prompt copied. Paste it into your AI chat.' : 'Copy failed on this device');
   },
-  openImport() { openImport(); },
+  openImport() { openModal('import'); },
   closeImport() { closeImport(); },
   async pasteImport() {
     try {
@@ -1267,11 +1385,13 @@ const actions = {
     const names = new Set(r.recipes.map((x) => x.name.toLowerCase()));
     if (r.recipes.length) {
       S.customRecipes = [...S.customRecipes.filter((x) => !names.has(x.name.toLowerCase())), ...r.recipes];
-      E.setCustomData(S.customRecipes);
+      syncCustom();
     }
     let blocks = 0;
     if (r.plan && r.plan.blocks.length) {
       S.cart.blocks = UI.importReplace ? r.plan.blocks : [...S.cart.blocks, ...r.plan.blocks];
+      S.cart.genWarnings = [];
+      S.cart.genFrom = null;
       S.cart.proteinGrams = UI.importReplace ? r.plan.proteinGrams : { ...S.cart.proteinGrams, ...r.plan.proteinGrams };
       if (r.plan.rawPerServing) S.cart.rawPerServing = Math.round(r.plan.rawPerServing);
       blocks = r.plan.blocks.length;
@@ -1289,7 +1409,7 @@ const actions = {
     const r = S.customRecipes.find((x) => x.id === el.dataset.id);
     if (!r || !confirm(`Delete "${r.name}"?`)) return;
     S.customRecipes = S.customRecipes.filter((x) => x.id !== r.id);
-    E.setCustomData(S.customRecipes);
+    syncCustom();
     persist('customRecipes'); render();
   },
 
@@ -1318,6 +1438,22 @@ const forms = {
       S.fridge.custom.push(txt);
     }
     persist('fridge'); render();
+  },
+  pantryAdd(fd) {
+    const res = E.customPantryItem(fd.get('item'), S.customPantry);
+    if (res.error) { toast(res.error); return; }
+    if (res.knownId) {
+      if (res.cat === 'pantry') { S.settings.pantry[res.knownId] = true; persist('settings'); toast(`${name(res.knownId)} is already a staple. It's switched on.`); }
+      else toast(`${name(res.knownId)} is a fridge item. Select it in Quick Cook instead.`);
+      render(); return;
+    }
+    if (res.duplicate) { S.settings.pantry[res.duplicate] = true; persist('settings'); render(); toast('Already in My staples. It\'s switched on.'); return; }
+    S.customPantry = [...S.customPantry, res.item];
+    S.settings.pantry[res.item.id] = true;
+    syncCustom(); persist('customPantry', 'settings'); render();
+    toast(`Added ${res.item.name} to your pantry`);
+    const input = document.querySelector('[data-form="pantryAdd"] input');
+    if (input) input.focus();
   },
   block(fd) {
     const term = String(fd.get('term') || '').trim().toLowerCase();
@@ -1348,9 +1484,7 @@ const forms = {
 };
 
 const changes = {
-  bProtein(el) { S.cart.builder.protein = el.value; persist('cart'); render(); },
-  pfProtein(el) { S.cart.pf.protein = el.value; persist('cart'); render(); },
-  pfGrams(el) { S.cart.pf.grams = Math.max(0, Math.round(Number(el.value) || 0)); persist('cart'); render(); },
+  wProtein(el) { S.cart.week.protein = el.value; persist('cart'); render(); },
   blockChoice(el) { const b = S.cart.blocks.find((x) => x.id === el.dataset.id); if (b) { b.choice = el.value; persist('cart'); render(); } },
   blockProtein(el) { const b = S.cart.blocks.find((x) => x.id === el.dataset.id); if (b) { b.protein = el.value; persist('cart'); render(); } },
   sauce(el) { UI.detail.sauceId = el.value; renderDetail(); },
@@ -1363,7 +1497,7 @@ const changes = {
       try {
         const parsed = JSON.parse(reader.result);
         S = E.mergeUserData(parsed.data || parsed);
-        E.setCustomData(S.customRecipes);
+        syncCustom();
         await store.saveAll(S);
         render();
         toast('Backup imported');
@@ -1398,11 +1532,18 @@ function bind() {
     const el = e.target.closest('[data-change]');
     if (el && changes[el.dataset.change]) changes[el.dataset.change](el);
   });
-  document.addEventListener('input', (e) => {
-    if (e.target.matches('[data-input="importText"]')) UI.importText = e.target.value;
-  });
+  const draftInput = (e) => {
+    const t = e.target;
+    if (!t.matches) return;
+    if (t.matches('[data-input="importText"]')) UI.importText = t.value;
+    if (!UI.draft) return;
+    if (t.matches('[data-draft]')) UI.draft[t.dataset.draft] = t.value;
+    if (t.matches('[data-draft-ing]')) { const row = UI.draft.ings[Number(t.dataset.draftIng)]; if (row) row[t.dataset.k] = t.value; }
+  };
+  document.addEventListener('input', draftInput);
+  document.addEventListener('change', draftInput);
   document.addEventListener('toggle', (e) => {
-    if (e.target.matches && e.target.matches('[data-toggle="pf"]')) UI.pfOpen = e.target.open;
+    if (e.target.matches && e.target.matches('[data-toggle="ai"]')) UI.aiOpen = e.target.open;
   }, true);
   // Write pending changes before iOS suspends the web app.
   document.addEventListener('visibilitychange', () => {
@@ -1414,7 +1555,7 @@ function bind() {
 async function init() {
   const stored = await store.loadAll();
   S = E.mergeUserData(stored);
-  E.setCustomData(S.customRecipes);
+  syncCustom();
   bind();
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {

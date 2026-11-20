@@ -17,8 +17,9 @@ export const KEYS = {
   fridge: 'fridge', // Quick Cook selections
   batch: 'batch', // Batch Prep selections
   recipePrefs: 'recipePrefs', // per-recipe portions + swaps
-  cart: 'cart', // Batch Cart meal blocks, protein-first grams, eaten/bought ticks
-  customRecipes: 'customRecipes', // recipes imported via the AI Chef Bridge
+  cart: 'cart', // 7-day planner: week settings, generated meal blocks, eaten/bought ticks
+  customRecipes: 'customRecipes', // My Recipes: written in-app, generated from the fridge, or imported
+  customPantry: 'customPantry', // [{ id, name }] staples typed in on the Rules tab (on/off lives in settings.pantry)
 };
 
 /** Browser backend wrapping localStorage (fails soft in private mode / quota errors). */

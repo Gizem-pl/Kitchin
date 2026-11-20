@@ -7,22 +7,38 @@ import {
   APPLIANCE_CAPACITY, PANTRY_DEFAULTS, DEFAULT_BLOCKLIST, DEFAULT_TARGETS, FREEZE_REASONS,
   MEAL_SLOTS, BATCH_CUISINES, BATCH_DEFAULTS, MASTER_METHODS, PROTEIN_MASTERS, CARB_COOKS,
   FLAVOR_KITS, BREAKFAST_BASES, STORAGE_TAGS, AI_RECIPE_TEMPLATE, AI_BATCH_TEMPLATE, MOODS,
+  CUISINE_PROFILES, GEN_PROTEINS, GEN_RAW_VEG, GEN_CARB_G,
 } from './recipes.js';
 
 // ------------------------------------------------------------------------------------------
-// Custom (imported) recipes & ingredients registry. Pure module state, no DOM.
+// Custom recipes (saved, written, generated, imported), custom pantry staples and the
+// unsaved "Chef's Creation" draft. Pure module state, no DOM.
 // ------------------------------------------------------------------------------------------
 let CUSTOM_RECIPES = [];
 let CUSTOM_INGREDIENTS = {};
+let CUSTOM_PANTRY_IDS = [];
+let DRAFT_RECIPE = null;
 
-/** Register imported recipes (each may carry its own `customIngredients`). */
-export function setCustomData(customRecipes = []) {
+/** Register the user's recipes (each may carry `customIngredients`) and custom pantry staples. */
+export function setCustomData(customRecipes = [], customPantry = []) {
   CUSTOM_RECIPES = customRecipes.filter(Boolean);
   CUSTOM_INGREDIENTS = {};
+  CUSTOM_PANTRY_IDS = [];
+  (customPantry || []).filter((x) => x && x.id && x.name).forEach((x) => {
+    CUSTOM_PANTRY_IDS.push(x.id);
+    CUSTOM_INGREDIENTS[x.id] = {
+      name: x.name, short: String(x.name).toLowerCase(), cat: 'pantry', group: 'My Staples',
+      m: [0, 0, 0, 0], flags: detectFlags(x.name), aliases: [], customPantry: true,
+    };
+  });
   CUSTOM_RECIPES.forEach((r) => Object.assign(CUSTOM_INGREDIENTS, r.customIngredients || {}));
 }
 export const allRecipes = () => [...RECIPES, ...CUSTOM_RECIPES];
 export const customRecipes = () => CUSTOM_RECIPES;
+export const customPantryIds = () => CUSTOM_PANTRY_IDS;
+/** Hold one unsaved generated recipe so the detail view can open it before it is saved. */
+export function setDraftRecipe(r) { DRAFT_RECIPE = r || null; }
+export const draftRecipe = () => DRAFT_RECIPE;
 
 // ------------------------------------------------------------------------------------------
 // Defaults
@@ -41,24 +57,36 @@ export function defaultUserData() {
     targets: { ...DEFAULT_TARGETS },
     mealLogs: {}, // { 'YYYY-MM-DD': [entry] }
     weightLogs: [], // [{ id, date, kg, chest, waist, hip }]
-    fridge: { selected: [], useFirst: [], custom: [], leftovers: [], mood: 'All', missingOne: false, leftoverMode: false },
+    fridge: { selected: [], useFirst: [], custom: [], leftovers: [], mood: 'All', missingOne: false, leftoverMode: false, genCuisine: 'Japanese' },
     batch: { focusId: null, sessionIds: [], size: 1 },
     recipePrefs: {}, // { recipeId: { servings, swaps: { fromId: subKey } } }
     cart: defaultCart(),
-    customRecipes: [], // imported recipes (AI Chef Bridge)
+    customRecipes: [], // the user's recipe library: written, generated and imported
+    customPantry: [], // [{ id: 'cp_…', name }] staples typed in on the Rules tab
+  };
+}
+
+/** Settings for the 7-day, 3-meals-a-day planner. */
+export function defaultWeek() {
+  return {
+    breakfastVariety: 2, // 1 = one breakfast all week, 2 = two breakfasts (Days 1–4 + Days 5–7)
+    mainMode: 'master', // 'master' = 1 master protein + 3 flavor kits, 'rotate' = rotating full dishes
+    dishesPerSlot: 2, // rotate mode: dishes per slot (2 = each eaten 3–4×, 3 = each 2–3×)
+    cuisines: ['Japanese', 'Turkish', 'Latin American'],
+    protein: 'turkey_breast',
+    seed: 0, // bumped by "Shuffle dishes"
   };
 }
 
 export function defaultCart() {
   return {
-    blocks: [], // [{ id, count, slot, cuisine, choice: 'kit:id'|'base:id'|'recipe:id', protein }]
+    blocks: [], // [{ id, count, slot, cuisine, choice: 'kit:id'|'base:id'|'recipe:id', protein, days? }]
     rawPerServing: BATCH_DEFAULTS.rawPerServing,
     method: 'auto',
-    proteinGrams: {}, // Protein-First overrides { proteinId: totalRawGrams }
+    proteinGrams: {}, // optional { proteinId: totalRawGrams } overrides (AI imports)
     eaten: [],
     bought: [],
-    builder: { count: 3, slot: 'Lunch', cuisine: 'Japanese', protein: 'turkey_breast' },
-    pf: { protein: 'turkey_breast', grams: 1000, slot: 'Lunch', cuisines: ['Japanese', 'Turkish'] },
+    week: defaultWeek(),
   };
 }
 
@@ -67,6 +95,13 @@ export function mergeUserData(stored) {
   const d = defaultUserData();
   if (!stored) return d;
   const s = stored.settings || {};
+  const storedCart = stored.cart || {};
+  const week = { ...d.cart.week, ...(storedCart.week || {}) };
+  week.cuisines = (Array.isArray(week.cuisines) ? week.cuisines : []).filter((c) => BATCH_CUISINES.includes(c));
+  if (!week.cuisines.length) week.cuisines = [...d.cart.week.cuisines];
+  const fridge = { ...d.fridge, ...(stored.fridge || {}) };
+  if (fridge.mood !== 'All' && !MOODS.includes(fridge.mood) && !(stored.customRecipes || []).some((r) => (r.moods || []).includes(fridge.mood))) fridge.mood = 'All';
+  if (!CUISINE_PROFILES[fridge.genCuisine]) fridge.genCuisine = d.fridge.genCuisine;
   return {
     settings: {
       pantry: { ...d.settings.pantry, ...(s.pantry || {}) },
@@ -77,11 +112,12 @@ export function mergeUserData(stored) {
     targets: { ...d.targets, ...(stored.targets || {}) },
     mealLogs: stored.mealLogs || {},
     weightLogs: stored.weightLogs || [],
-    fridge: { ...d.fridge, ...(stored.fridge || {}) },
+    fridge,
     batch: { ...d.batch, ...(stored.batch || {}) },
     recipePrefs: stored.recipePrefs || {},
-    cart: { ...d.cart, ...(stored.cart || {}), builder: { ...d.cart.builder, ...((stored.cart || {}).builder || {}) }, pf: { ...d.cart.pf, ...((stored.cart || {}).pf || {}) } },
+    cart: { ...d.cart, ...storedCart, week },
     customRecipes: Array.isArray(stored.customRecipes) ? stored.customRecipes : [],
+    customPantry: Array.isArray(stored.customPantry) ? stored.customPantry.filter((x) => x && x.id && x.name) : [],
   };
 }
 
@@ -195,7 +231,7 @@ export function formatRatio(sub) {
 // Recipe resolution: swaps + locks + blocklist + appliance adaptation
 // ------------------------------------------------------------------------------------------
 export function getRecipe(id) {
-  return allRecipes().find((r) => r.id === id) || null;
+  return allRecipes().find((r) => r.id === id) || (DRAFT_RECIPE && DRAFT_RECIPE.id === id ? DRAFT_RECIPE : null);
 }
 
 /**
@@ -488,7 +524,7 @@ function earliestFit(intervals, t, dur) {
 
 /**
  * Greedy list scheduler.
- * jobs: [{ resolved, portions }]
+ * jobs: [{ resolved, portions, phase? }]  (phase 1 = breakfast and long-cook bases, 2 = mains)
  * Resources: one cook (busy during active minutes) + appliance slots (busy for active + passive).
  */
 export function buildTimeline(jobs) {
@@ -505,6 +541,7 @@ export function buildTimeline(jobs) {
         recipeName: job.resolved.name,
         emoji: job.resolved.emoji,
         stepNo: si + 1,
+        phase: job.phase || 0,
         app: s.app,
         adaptedFrom: s.adaptedFrom || null,
         a: t.a,
@@ -556,7 +593,9 @@ export function buildTimeline(jobs) {
     let pick = null;
     candidates.forEach((t) => {
       const p = plan(t);
-      if (!pick || p.start < pick.p.start || (p.start === pick.p.start && tail(t.uid) > tail(pick.t.uid))) pick = { t, p };
+      // Earliest start wins. Ties go to the lower phase (breakfast and long-cook bases first), then the longest remaining path.
+      const better = !pick || p.start < pick.p.start || (p.start === pick.p.start && (t.phase < pick.t.phase || (t.phase === pick.t.phase && tail(t.uid) > tail(pick.t.uid))));
+      if (better) pick = { t, p };
     });
     const { t, p } = pick;
     const start = p.start;
@@ -970,7 +1009,8 @@ export function planCart(cart, settings, recipePrefs = {}) {
   // 1) Resolve each block's choice under the current rules.
   const blocks = [];
   (cart.blocks || []).forEach((b) => {
-    const count = clamp(Math.round(num(b.count) || 1), 1, BATCH_DEFAULTS.maxCount);
+    const days = Array.isArray(b.days) ? [...new Set(b.days.map((d) => Math.round(num(d))).filter((d) => d >= 1 && d <= 14))].sort((x, y) => x - y) : null;
+    const count = days && days.length ? days.length : clamp(Math.round(num(b.count) || 1), 1, BATCH_DEFAULTS.maxCount);
     const options = choiceOptions(b.slot, b.cuisine, settings, recipePrefs);
     const opt = options.find((o) => o.key === b.choice) || options[0];
     if (!opt) { warnings.push(`No ${b.slot.toLowerCase()} option for ${b.cuisine} fits your rules, so that block is skipped.`); return; }
@@ -981,7 +1021,7 @@ export function planCart(cart, settings, recipePrefs = {}) {
       if (!protein) { warnings.push('Every master protein is blocked by your rules.'); return; }
       if (b.protein && protein !== b.protein) warnings.push(`${ingredientName(b.protein)} is blocked by your rules, so ${ingredientName(protein)} is used instead.`);
     }
-    blocks.push({ ...b, count, opt, options, protein });
+    blocks.push({ ...b, count, days: days && days.length ? days : null, opt, options, protein });
   });
 
   // 2) Pool proteins into master cooks.
@@ -1050,15 +1090,18 @@ export function planCart(cart, settings, recipePrefs = {}) {
   });
   const live = blocks.filter((b) => !b.skip);
 
-  // 4) Containers & smart fridge/freezer split (per meal slot: day N = Nth container of that slot).
+  // 4) Containers & smart fridge/freezer split. Blocks with explicit `days` (7-day planner) use
+  //    them; other blocks fill the next free days of their slot (day N = Nth container of that slot).
   const containers = [];
   MEAL_SLOTS.forEach((slot) => {
     const rank = (b) => (b.freezer === 'no' ? 0 : b.freezer === 'partial' ? 1 : 2);
     const inSlot = live.filter((b) => b.slot === slot).map((b, i) => ({ b, i })).sort((x, y) => rank(x.b) - rank(y.b) || x.i - y.i).map((x) => x.b);
-    let day = 0;
-    inSlot.forEach((b) => {
+    let day = Math.max(0, ...inSlot.filter((b) => b.days).flatMap((b) => b.days));
+    const lastExplicit = day;
+    [...inSlot.filter((b) => b.days), ...inSlot.filter((b) => !b.days)].forEach((b, bi, arr) => {
+      if (!b.days && (bi === 0 || arr[bi - 1].days)) day = lastExplicit;
       for (let k = 1; k <= b.count; k += 1) {
-        day += 1;
+        if (b.days) day = b.days[k - 1]; else day += 1;
         let where = day <= fridgeDays ? 'fridge' : 'freezer';
         if (where === 'freezer' && b.freezer === 'no') { where = 'fresh'; warnings.push(`${b.name} doesn't freeze. Day ${day} ${slot.toLowerCase()} should be cooked fresh or eaten earlier.`); }
         const reheat = [...b.reheat];
@@ -1081,7 +1124,7 @@ export function planCart(cart, settings, recipePrefs = {}) {
   const grocery = buildGrocery(sums, settings);
 
   // 6) Parallel timeline: masters + pooled carbs + kits/bases + full recipes.
-  const jobs = masters.map((m) => ({ resolved: m.resolved, portions: m.count }));
+  const jobs = masters.map((m) => ({ resolved: m.resolved, portions: m.count, phase: 2 }));
   const carbTotals = {};
   const carbCounts = {};
   live.forEach((b) => b.poolLines.forEach((l) => l.entries.forEach((e) => {
@@ -1091,16 +1134,17 @@ export function planCart(cart, settings, recipePrefs = {}) {
   Object.keys(carbTotals).forEach((id) => {
     const res = resolveRecipe(carbPseudo(id, carbTotals[id] / carbCounts[id]), settings);
     if (res.hidden) warnings.push(`Can't cook the shared ${ingredientShort(id)} with your appliances.`);
-    else jobs.push({ resolved: res, portions: carbCounts[id] });
+    else jobs.push({ resolved: res, portions: carbCounts[id], phase: 1 });
   });
   const pooled = {};
   live.forEach((b) => {
     const k = b.opt.key;
-    if (!pooled[k]) pooled[k] = { resolved: b.res, portions: 0, kind: b.opt.kind, def: b.def, storage: b.storage, sauceName: b.sauceName, sauceItems: b.sauceItems, cuisines: new Set() };
+    if (!pooled[k]) pooled[k] = { resolved: b.res, portions: 0, kind: b.opt.kind, def: b.def, storage: b.storage, sauceName: b.sauceName, sauceItems: b.sauceItems, cuisines: new Set(), slots: new Set() };
     pooled[k].portions += b.count;
     pooled[k].cuisines.add(b.cuisine);
+    pooled[k].slots.add(b.slot);
   });
-  Object.values(pooled).forEach((p) => jobs.push({ resolved: p.resolved, portions: p.portions }));
+  Object.values(pooled).forEach((p) => jobs.push({ resolved: p.resolved, portions: p.portions, phase: p.slots.size === 1 && p.slots.has('Breakfast') ? 1 : 2 }));
   const usable = jobs.filter((j) => !j.resolved.steps.some((s) => s.unavailable));
   const timeline = usable.length ? buildTimeline(usable) : null;
 
@@ -1109,13 +1153,22 @@ export function planCart(cart, settings, recipePrefs = {}) {
     saucePerBox: p.sauceItems.reduce((s, e) => s + e.g, 0), cuisines: [...p.cuisines], tip: p.def.tip || null,
   }));
 
-  const total = containers.reduce((t, c) => ({ p: t.p + c.macros.p, c: t.c + c.macros.c, f: t.f + c.macros.f, kcal: t.kcal + c.macros.kcal }), { p: 0, c: 0, f: 0, kcal: 0 });
+  const addM = (t, m) => ({ p: t.p + m.p, c: t.c + m.c, f: t.f + m.f, kcal: t.kcal + m.kcal });
+  const zero = { p: 0, c: 0, f: 0, kcal: 0 };
+  const total = containers.reduce((t, c) => addM(t, c.macros), zero);
+  const maxDay = containers.reduce((m, c) => Math.max(m, c.day), 0);
+  const days = Array.from({ length: maxDay }, (_, i) => {
+    const day = i + 1;
+    const cs = containers.filter((c) => c.day === day);
+    return { day, where: day <= fridgeDays ? 'fridge' : 'freezer', containers: cs, macros: cs.reduce((t, c) => addM(t, c.macros), zero) };
+  });
   return {
     blocks: live.map((b) => ({
       id: b.id, slot: b.slot, cuisine: b.cuisine, count: b.count, choice: b.opt.key, kind: b.opt.kind, label: b.opt.label,
       options: b.options, protein: b.protein, macros: b.macros, storage: b.storage, emoji: b.emoji,
     })),
     containers,
+    days,
     masters,
     kits,
     grocery,
@@ -1128,6 +1181,8 @@ export function planCart(cart, settings, recipePrefs = {}) {
       freezer: containers.filter((c) => c.where === 'freezer').length,
       macros: total,
       avgProtein: containers.length ? total.p / containers.length : 0,
+      avgProteinPerDay: maxDay ? total.p / maxDay : 0,
+      avgKcalPerDay: maxDay ? total.kcal / maxDay : 0,
     },
   };
 }
@@ -1168,7 +1223,7 @@ export function buildChefPrompt({ mode = 'recipe', settings, fridge = {}, target
     L.push(`- Raw protein per serving: ~${cart.rawPerServing || BATCH_DEFAULTS.rawPerServing} g`);
     L.push('');
     L.push('## Task');
-    L.push('Plan my weekly batch prep as meal blocks. Lunch/dinner blocks share ONE neutral master protein cook and get a different cuisine flavor kit each. Breakfast blocks use a breakfast base. Days 1–4 go in the fridge and Day 5+ in the freezer, so cold or creamy sauces must be spoon-after.');
+    L.push('Plan my 7-day batch prep (Breakfast, Lunch and Dinner for Days 1–7 = 21 boxes) as meal blocks. Lunch/dinner blocks share ONE neutral master protein cook and get a different cuisine flavor kit each. Breakfast blocks use a breakfast base. Days 1–4 go in the fridge and Day 5+ in the freezer, so cold or creamy sauces must be spoon-after.');
     L.push(`Allowed slots: ${MEAL_SLOTS.join(', ')}. Allowed cuisines: ${BATCH_CUISINES.join(', ')}. Count is 1–10 per block.`);
     L.push(`Built-in flavor kits (use their id in "kit"): ${FLAVOR_KITS.map((k) => `${k.id} [${k.cuisines.join('/')}]`).join('; ')}.`);
     L.push(`Built-in breakfast bases (use their id in "base"): ${BREAKFAST_BASES.map((k) => `${k.id} [${k.cuisines.join('/')}]`).join('; ')}.`);
@@ -1417,4 +1472,392 @@ export function importCheck(recipe, settings) {
   const per = servingMacros(res);
   CUSTOM_INGREDIENTS = tmpPrev;
   return { hidden: res.hidden, reasons: res.hiddenReasons, swaps: res.swapsApplied.length, perServing: per };
+}
+
+// ==========================================================================================
+// 7-DAY PLANNER: 21 meals (Breakfast, Lunch, Dinner × Days 1–7) → blocks with explicit days.
+// The blocks feed planCart(), which pools proteins and carbs into one parallel session.
+// ==========================================================================================
+const rotate = (arr, k) => (arr.length ? arr.map((_, i) => arr[(i + k) % arr.length]) : arr);
+
+/** Round-robin across cuisines so the week mixes them instead of clumping. */
+function interleave(lists) {
+  const out = [];
+  const seen = new Set();
+  const max = Math.max(0, ...lists.map((l) => l.length));
+  for (let i = 0; i < max; i += 1) {
+    lists.forEach((l) => {
+      const o = l[i];
+      if (o && !seen.has(o.key)) { seen.add(o.key); out.push(o); }
+    });
+  }
+  return out;
+}
+
+export function generateWeek(week = {}, settings, recipePrefs = {}, now = Date.now()) {
+  const w = { ...defaultWeek(), ...week };
+  const warnings = [];
+  const picked = (w.cuisines || []).filter((c) => BATCH_CUISINES.includes(c));
+  const cs = picked.length ? picked : ['Quick High-Protein'];
+  const seed = Math.max(0, Math.round(num(w.seed)));
+  const blocks = [];
+  const add = (slot, opt, days, protein) => blocks.push({
+    id: newId(now, blocks.length), slot, cuisine: opt.cuisine, choice: opt.key,
+    protein: opt.kind === 'kit' ? protein : null, count: days.length, days,
+  });
+  const freezable = (o) => o.kind !== 'recipe' || ((getRecipe(o.id) || {}).batch?.freezer || 'ok') !== 'no';
+  const optionsFor = (slot, kinds) => cs.map((c) => choiceOptions(slot, c, settings, recipePrefs)
+    .filter((o) => kinds.includes(o.kind) && freezable(o))
+    .map((o) => ({ ...o, cuisine: c })));
+
+  // Breakfast: bases first (they are built for batching), then breakfast recipes.
+  const bLists = optionsFor('Breakfast', ['base', 'recipe']);
+  bLists.forEach((l) => l.sort((a, b) => (a.kind === 'base' ? 0 : 1) - (b.kind === 'base' ? 0 : 1)));
+  const bOpts = rotate(interleave(bLists), seed);
+  if (!bOpts.length) warnings.push('No breakfast fits your rules for these cuisines, so breakfasts are left out.');
+  else if (num(w.breakfastVariety) >= 2 && bOpts.length >= 2) {
+    add('Breakfast', bOpts[0], [1, 2, 3, 4]);
+    add('Breakfast', bOpts[1], [5, 6, 7]);
+  } else {
+    add('Breakfast', bOpts[0], [1, 2, 3, 4, 5, 6, 7]);
+    if (num(w.breakfastVariety) >= 2) warnings.push('Only one breakfast fits your rules and cuisines, so it covers all 7 days.');
+  }
+
+  // Lunch & dinner: 14 meals.
+  const protein = resolveMasterProtein(w.protein || 'turkey_breast', settings);
+  const kits = rotate(interleave(optionsFor('Lunch', ['kit'])), seed);
+  const recipes = rotate(interleave(optionsFor('Lunch', ['recipe'])), seed);
+  const assign = {};
+  const put = (slot, dish, day) => {
+    const k = `${slot}|${dish.key}`;
+    (assign[k] = assign[k] || { slot, dish, days: [] }).days.push(day);
+  };
+
+  if (w.mainMode === 'rotate') {
+    const per = num(w.dishesPerSlot) === 3 ? 3 : 2;
+    const pool = [...recipes, ...(protein ? kits : [])].slice(0, per * 2);
+    if (!pool.length) warnings.push('No lunch or dinner dishes fit your rules for these cuisines.');
+    const L = pool.filter((_, i) => i % 2 === 0).slice(0, per);
+    let D = pool.filter((_, i) => i % 2 === 1).slice(0, per);
+    if (!D.length) D = rotate(L, 1);
+    if (pool.length && pool.length < per * 2) warnings.push(`Only ${pool.length} dish${pool.length > 1 ? 'es fit' : ' fits'} your rules and cuisines, so some repeat more often.`);
+    for (let day = 1; day <= 7; day += 1) {
+      if (L.length) put('Lunch', L[(day - 1) % L.length], day);
+      if (D.length) put('Dinner', D[(day - 1) % D.length], day);
+    }
+  } else {
+    if (!protein) warnings.push('Every master protein is blocked by your rules.');
+    const three = protein ? kits.slice(0, 3) : [];
+    if (protein && !three.length) warnings.push('No flavor kits fit your rules for these cuisines.');
+    if (three.length && three.length < 3) warnings.push(`Only ${three.length} flavor kit${three.length > 1 ? 's fit' : ' fits'} your rules and cuisines. Add a cuisine for more variety.`);
+    let m = 0;
+    for (let day = 1; day <= 7 && three.length; day += 1) {
+      ['Lunch', 'Dinner'].forEach((slot) => { put(slot, three[m % three.length], day); m += 1; });
+    }
+  }
+  Object.values(assign).forEach((a) => add(a.slot, a.dish, a.days, protein));
+  return { blocks, warnings, protein };
+}
+
+// ==========================================================================================
+// CHEF'S CREATION: compose a complete recipe from the selected fridge items, the cuisine's
+// flavour profile, active pantry staples and enabled appliances. Pure and deterministic.
+// ==========================================================================================
+export const listGenCuisines = () => Object.keys(CUISINE_PROFILES);
+
+const SIG_WORD = {
+  yuzu: 'Yuzu', shiro_miso: 'Miso', lemon: 'Lemon', lime: 'Lime', tamari: 'Tamari', ginger: 'Ginger', sumac: 'Sumac',
+  skyr: 'Garlic-Skyr', tahini: 'Tahini', passata: 'Tomato', dried_mint: 'Mint', cilantro: 'Cilantro', cumin: 'Cumin',
+  avocado: 'Avocado', oregano: 'Oregano', feta: 'Feta', honey: 'Honey', mirin: 'Mirin',
+};
+const PROTEIN_TITLE = {
+  chicken_breast: 'Chicken', turkey_breast: 'Turkey', beef_steak: 'Steak', minced_turkey: 'Turkey Mince', minced_beef: 'Beef Mince',
+  salmon: 'Salmon', shrimp: 'Shrimp', eggs: 'Eggs', edamame: 'Edamame', chickpeas: 'Crispy Chickpeas', black_beans: 'Black Beans',
+  steamed_edamame: 'Edamame', cooked_turkey: 'Turkey', cooked_beef: 'Beef',
+};
+const CARB_TITLE = {
+  rice: 'Rice', quinoa: 'Quinoa', potatoes: 'Crispy Potatoes', sweet_potato: 'Sweet Potato', gf_pasta: 'GF Pasta',
+  chickpea_pasta: 'Chickpea Pasta', rice_cakes: 'Rice Cakes', corn_tortillas: 'Corn Tortillas', cooked_rice: 'Rice',
+};
+const titleCase = (s) => String(s).replace(/\b[a-z]/g, (c) => c.toUpperCase());
+const listJoin = (xs) => (xs.length <= 1 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+const plainShort = (id) => ingredientShort(id).replace(/\s*\(.*?\)/g, '');
+const lowerFirst = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+const proteinKind = (id) => Object.keys(GEN_PROTEINS).find((k) => GEN_PROTEINS[k].ids.includes(id)) || null;
+
+export function generateFridgeRecipe({ settings, fridge = {}, cuisine = 'Japanese', servings = 2, variant = 0, proteinTarget = 40, now = Date.now() }) {
+  const cName = CUISINE_PROFILES[cuisine] ? cuisine : 'Quick High-Protein';
+  const prof = CUISINE_PROFILES[cName];
+  const n = clamp(Math.round(num(servings) || 2), 1, 12);
+  const v = Math.max(0, Math.round(num(variant)));
+  const avail = buildAvailability({
+    pantry: settings.pantry,
+    fridge: fridge.selected || [],
+    leftovers: fridge.leftoverMode ? fridge.leftovers || [] : [],
+    custom: fridge.custom || [],
+  });
+  const ok = (id) => isAvailable(id, avail) && !isBlocked(id, settings);
+  const useFirst = new Set(fridge.useFirst || []);
+  const picked = [...avail.ids]
+    .filter((id) => ['fresh', 'leftover'].includes(getIngredient(id).cat) && !isBlocked(id, settings))
+    .sort((a, b) => Number(useFirst.has(b)) - Number(useFirst.has(a)));
+  const notes = [];
+
+  // 1) Protein: fresh meat/fish/leftovers → eggs → selected legumes → pantry legumes.
+  const tiers = [
+    picked.filter((id) => ['breast', 'steak', 'mince', 'fish', 'shrimp', 'cooked'].includes(proteinKind(id))),
+    picked.filter((id) => proteinKind(id) === 'egg'),
+    picked.filter((id) => proteinKind(id) === 'legume'),
+    GEN_PROTEINS.legume.ids.filter((id) => getIngredient(id).cat === 'pantry' && ok(id)),
+  ];
+  const ti = tiers.findIndex((t) => t.length);
+  if (ti < 0) return { error: 'Select a protein from your fridge (or keep chickpeas or black beans in your pantry), then try again.' };
+  const protein = rotate(tiers[ti], v)[0];
+  if (ti === 3) notes.push(`No fresh protein is selected, so ${ingredientName(protein).toLowerCase()} from your pantry carries the protein.`);
+  const kind = proteinKind(protein);
+  const spec = GEN_PROTEINS[kind];
+
+  const lines = [];
+  const tok = {};
+  const add = (id, gPer, note) => {
+    const line = lines.find((l) => l.id === id);
+    if (line) { line.g += gPer * n; return `{${id}}`; }
+    lines.push({ id, g: gPer * n, ...(note ? { note } : {}) });
+    tok[id] = `{=${id}}`;
+    return `{=${id}}`;
+  };
+  const pick = (comp = []) => comp.map((opts) => opts.find((o) => o.id !== protein && (isBasic(o.id) || ok(o.id))) || null);
+  const realChosen = (arr) => arr.filter((o) => o && !isBasic(o.id));
+
+  const pm = getIngredient(protein).m[0] || 10;
+  const pG = clamp(Math.round(((proteinTarget / pm) * 100) / 10) * 10, spec.min, spec.max);
+  const P = add(protein, pG);
+  const pName = `{${protein}}`;
+  if (kind === 'egg' && picked.includes('egg_whites') && ok('egg_whites')) add('egg_whites', 80);
+
+  // 2) Appliances (variant rotates through the enabled ones).
+  const enabled = APPLIANCES.map((a) => a.id).filter((a) => settings.appliances[a]);
+  const pApps = Object.keys(spec.cook).filter((a) => enabled.includes(a));
+  if (!pApps.length) return { error: 'Turn on at least one appliance in Rules.' };
+  const pApp = pApps[v % pApps.length];
+
+  // 3) Flavour components.
+  const oilId = ['olive_oil', 'sesame_oil', 'butter'].find(ok) || 'olive_oil';
+  const spices = realChosen(pick(prof.spice));
+  const glazeRaw = kind === 'egg' ? [] : pick(prof.glaze).filter(Boolean);
+  const glaze = realChosen(glazeRaw).length ? glazeRaw : [];
+  const coldRaw = pick(prof.cold);
+  const cold = coldRaw[0] ? coldRaw.filter(Boolean) : [];
+  const finish = realChosen(pick(prof.finish));
+  const garnish = realChosen(pick(prof.garnish));
+  const sides = realChosen(pick(prof.side));
+
+  // 4) Carb: selected fresh carbs first, then pantry, in the cuisine's order.
+  const carbCands = prof.carbs.filter(ok);
+  const carbSorted = [...carbCands.filter((id) => picked.includes(id)), ...carbCands.filter((id) => !picked.includes(id))];
+  const carb = carbSorted.length ? carbSorted[v % carbSorted.length] : null;
+  if (!carb) notes.push('No carb is available, so this is a low-carb plate.');
+
+  // 5) Vegetables: whatever is selected and not already used by the flavour profile.
+  const usedIds = new Set([protein, carb, ...spices, ...glaze, ...cold, ...finish, ...garnish, ...sides].filter(Boolean).map((o) => (typeof o === 'string' ? o : o.id)));
+  const veg = picked.filter((id) => getIngredient(id).group === 'Vegetables' && !usedIds.has(id));
+  const rawVeg = veg.filter((id) => GEN_RAW_VEG.includes(id)).slice(0, 2);
+  const cookVeg = veg.filter((id) => !GEN_RAW_VEG.includes(id)).slice(0, 3);
+  if (!veg.length && !sides.length) notes.push('Add a vegetable from your fridge for colour and fibre.');
+  const unused = picked.filter((id) => !usedIds.has(id) && !veg.slice(0, 5).includes(id) && id !== 'egg_whites');
+
+  // 6) Ingredient lines (per serving × n).
+  const saltT = add('salt', Math.round(pG * 0.01 * 10) / 10 + 0.5);
+  const pepT = add('black_pepper', 0.3);
+  const spiceT = spices.map((o) => add(o.id, o.g));
+  const oilT = add(oilId, 6 + (cookVeg.length ? 4 : 0));
+  const carbT = carb ? add(carb, GEN_CARB_G[carb] || 70) : null;
+  const carbFat = carb && prof.carbFat ? realChosen(pick(prof.carbFat)) : [];
+  const carbFatT = carbFat.map((o) => add(o.id, o.g));
+  const vegShare = cookVeg.length ? 150 / cookVeg.length : 0;
+  const cookVegT = cookVeg.map((id) => add(id, id === 'spinach' ? Math.min(vegShare, 50) : vegShare));
+  const rawVegT = rawVeg.map((id) => add(id, id === 'avocado' ? 50 : 60));
+  const sideT = sides.map((o) => add(o.id, o.g));
+  const glazeT = glaze.map((o) => add(o.id, o.g));
+  const coldT = cold.map((o) => add(o.id, o.g));
+  const finishT = finish.map((o) => add(o.id, o.g));
+  const garnishT = garnish.map((o) => add(o.id, o.g));
+
+  // 7) Steps with explicit dependencies so the scheduler can run them in parallel.
+  const steps = [];
+  const S = (st) => { steps.push(st); return steps.length - 1; };
+  const fill = (t) => t.replace(/\{P\}/g, pName).replace(/\{O\}/g, `{${oilId}}`);
+  const cutVeg = [...cookVeg, ...rawVeg].map((id) => `{${id}}`);
+  const prepText = [
+    fill(spec.prep).replace(pName, P),
+    `Season it with ${listJoin([saltT, pepT, ...spiceT])}.`,
+    cutVeg.length ? `Cut ${listJoin(cutVeg)} into even bite-size pieces.` : '',
+  ].filter(Boolean).join(' ');
+  const iPrep = S({ app: 'prep', a: 4 + cutVeg.length, p: kind === 'steak' ? 15 : 0, dep: [], t: prepText });
+
+  const ends = [];
+  if (carb) {
+    const cook = CARB_COOKS[carb] || { steps: [{ app: 'stovetop', a: 3, p: 15, dep: [], t: `Cook {=${carb}} as the packet directs.` }] };
+    const base = steps.length;
+    cook.steps.forEach((st, i) => S({ ...st, dep: Array.isArray(st.dep) ? st.dep.map((d) => d + base) : (i ? [base + i - 1] : []) }));
+    ends.push(steps.length - 1);
+  }
+
+  const method = spec.cook[pApp];
+  const alt = {};
+  pApps.filter((a) => a !== pApp).forEach((a) => { alt[a] = { ...spec.cook[a], t: fill(spec.cook[a].t).replace(`{${oilId}}`, oilT) }; });
+  let iP = S({ app: pApp, a: method.a, p: method.p, cap: method.cap, dep: [iPrep], t: fill(method.t).replace(`{${oilId}}`, oilT), alt });
+  if (spec.rest) iP = S({ app: 'none', a: 0, p: spec.rest, dep: [iP], t: spec.slice ? `Rest it ${spec.rest} min, then slice against the grain.` : `Rest it ${spec.rest} min.` });
+
+  if (glaze.length) {
+    const gApp = enabled.includes('stovetop') ? 'stovetop' : enabled.includes('instantpot') ? 'instantpot' : 'prep';
+    let t = prof.glazeText.replace('{LIST}', listJoin(glazeT)).replace(/\{P\}/g, plainShort(protein));
+    if (gApp === 'prep') t = `Whisk ${listJoin(glazeT)} together and brush it over the hot ${plainShort(protein)}.`;
+    else if (pApp !== gApp) t = `In a wide pan, ${lowerFirst(t)}`;
+    iP = S({ app: gApp, a: 3, p: gApp === 'prep' ? 0 : 2, dep: [iP], t });
+  }
+  ends.push(iP);
+
+  if (cookVeg.length) {
+    const vApp = enabled.includes('airfryer') && pApp !== 'airfryer' ? 'airfryer' : enabled.includes('stovetop') ? 'stovetop' : enabled[0];
+    const hard = cookVegT.filter((_, i) => cookVeg[i] !== 'spinach');
+    const wilt = cookVeg.includes('spinach') ? ` Wilt the {spinach} into the hot veg at the end.` : '';
+    let t;
+    if (!hard.length) t = `Wilt {=spinach} in a hot pan with a few drops of {${oilId}} for 1 min. Season with a pinch of salt.`;
+    else if (vApp === 'airfryer') t = `Toss ${listJoin(hard)} with a little {${oilId}} and a pinch of salt. Air fry at 200 °C for 8–10 min, shaking once, until charred at the edges.${wilt}`;
+    else if (vApp === 'instantpot') t = `Sauté mode (High): cook ${listJoin(hard)} in a little {${oilId}} with a pinch of salt for 5 min until tender-crisp.${wilt}`;
+    else t = `Sauté ${listJoin(hard)} in a little {${oilId}} over high heat for 5–6 min until charred in spots. Season with a pinch of salt.${wilt}`;
+    const vApp2 = hard.length ? vApp : (enabled.includes('stovetop') ? 'stovetop' : vApp);
+    ends.push(S({ app: vApp2, a: vApp2 === 'airfryer' ? 2 : 5, p: vApp2 === 'airfryer' ? 9 : 0, cap: 4, dep: [iPrep], t: t.replace('{=spinach}', cookVegT[cookVeg.indexOf('spinach')] || '{=spinach}') }));
+  }
+
+  const warmSides = sides.filter((o) => !GEN_RAW_VEG.includes(o.id));
+  const rawSides = sides.filter((o) => GEN_RAW_VEG.includes(o.id));
+  if (warmSides.length) {
+    const sApp = enabled.includes('stovetop') ? 'stovetop' : enabled[0];
+    ends.push(S({ app: sApp, a: 2, p: 3, dep: [], t: `Warm ${listJoin(warmSides.map((o) => tok[o.id]))} with a splash of water and a pinch of salt for 3 min.` }));
+  }
+  if (cold.length) {
+    const ct = typeof prof.coldText === 'string' ? prof.coldText : (prof.coldText[cold[0].id] || Object.values(prof.coldText)[0]);
+    ends.push(S({ app: 'prep', a: 3, p: 0, dep: [], t: ct.replace('{LIST}', listJoin(coldT)) }));
+  }
+
+  const plate = [];
+  if (carbFatT.length && prof.carbFatText) plate.push(prof.carbFatText.replace('{LIST}', listJoin(carbFatT)).replace('{C}', plainShort(carb)));
+  if (finishT.length) plate.push(`Finish the ${plainShort(protein)} off the heat with ${listJoin(finishT)}.`);
+  const parts = [carb ? plainShort(carb) : null, plainShort(protein), cookVeg.length ? 'veg' : null, ...warmSides.map((o) => plainShort(o.id))].filter(Boolean);
+  plate.push(`Plate the ${listJoin(parts)}.`);
+  if (rawVegT.length || rawSides.length) plate.push(`Add ${listJoin([...rawVegT, ...rawSides.map((o) => tok[o.id])])}, sliced, on the side.`);
+  if (cold.length) plate.push('Spoon the cold sauce over at the table.');
+  if (garnishT.length) plate.push(`Scatter ${listJoin(garnishT)} over the top.`);
+  S({ app: 'prep', a: 2, p: 0, dep: [...new Set(ends)], t: plate.join(' ') });
+
+  // 8) Name, story, technique, batch advice.
+  const flavourIds = new Set([...spices, ...glaze, ...cold, ...finish, ...garnish].map((o) => o.id));
+  const words = prof.sig.filter((id) => flavourIds.has(id)).slice(0, 2).map((id) => SIG_WORD[id]);
+  const vegTitle = cookVeg[0] || rawVeg[0] ? titleCase(ingredientShort(cookVeg[0] || rawVeg[0])) : null;
+  let carbTitle = carb ? CARB_TITLE[carb] || titleCase(ingredientShort(carb)) : null;
+  if (carb && ['rice', 'cooked_rice'].includes(carb) && cName === 'Turkish' && carbFat.some((o) => o.id === 'butter')) carbTitle = 'Butter Pilav';
+  if (carb && ['rice', 'cooked_rice'].includes(carb) && cName === 'Latin American' && carbFat.some((o) => o.id === 'lime')) carbTitle = 'Lime Rice';
+  const withPart = [vegTitle, carbTitle].filter(Boolean);
+  const suffix = prof.suffixNeedsGlaze && !glaze.length ? '' : prof.suffix;
+  const name = `${[prof.prefix, words.join(' & '), suffix, PROTEIN_TITLE[protein] || titleCase(ingredientShort(protein))].filter(Boolean).join(' ')}${withPart.length ? ` with ${withPart.join(' & ')}` : ''}`;
+  const fromFridge = [protein, ...cookVeg, ...rawVeg, ...(carb && picked.includes(carb) ? [carb] : [])].filter((id) => picked.includes(id));
+  const blurb = `Built from your ${listJoin(fromFridge.map((id) => ingredientShort(id))) || 'pantry'}. ${prof.blurb}`;
+  const freshPots = [...cold, ...finish, ...garnish].map((o) => o.id).filter((id) => getIngredient(id).cat === 'fresh' || getIngredient(id).freeze);
+  const packFresh = [...new Set([...freshPots, ...rawVeg, ...rawSides.map((o) => o.id)])];
+  const freezer = ['egg', 'shrimp'].includes(kind) || packFresh.length ? 'partial' : 'ok';
+
+  const recipe = {
+    id: `gen-${slugify(name)}-${now.toString(36)}`,
+    custom: true,
+    generated: true,
+    name,
+    emoji: prof.emoji,
+    cuisine: cName,
+    moods: [cName],
+    slot: spec.breakfast ? 'Breakfast' : null,
+    servings: n,
+    blurb,
+    ingredients: lines.map((l) => ({ ...l, g: Math.round(l.g * 10) / 10 })),
+    steps,
+    techniques: [spec.tip, ...prof.tips].filter(Boolean).slice(0, 3),
+    sauceId: prof.sauceId || null,
+    batch: {
+      freezer,
+      packFresh,
+      note: packFresh.length ? `Box the ${plainShort(protein)}${carb ? `, ${plainShort(carb)}` : ''} and cooked veg together. Keep the ${listJoin(packFresh.map(plainShort))} in a separate pot and add it after reheating.` : 'Everything boxes and reheats together.',
+    },
+    reheat: { microwave: `Covered with 1 tbsp of water, 2 min at 70%, stirring halfway.${packFresh.length ? ' Add the fresh toppings after.' : ''}` },
+  };
+  return { recipe, used: [...new Set([protein, ...cookVeg, ...rawVeg, ...[...usedIds].filter((id) => picked.includes(id))])], unused, notes };
+}
+
+// ==========================================================================================
+// WRITE MY OWN: a plain form (title, ingredients in g/ml, one step per line) → library recipe.
+// Reuses the import normaliser so written, generated and imported recipes share one shape.
+// ==========================================================================================
+export function createUserRecipe(d = {}, now = Date.now()) {
+  const warnings = [];
+  const errors = [];
+  const stepLines = String(d.steps || '').split(/\n+/).map((t) => t.replace(/^\s*(\d+\s*[.)]|[-•*])\s*/, '').trim()).filter(Boolean);
+  const ings = (Array.isArray(d.ings) ? d.ings : []).filter((i) => String(i.name || '').trim());
+  if (!String(d.title || '').trim()) errors.push('Give your recipe a title.');
+  if (!ings.length) errors.push('Add at least one ingredient.');
+  ings.filter((i) => !(num(i.amt) > 0)).forEach((i) => errors.push(`Add an amount for "${String(i.name).trim()}".`));
+  if (!stepLines.length) errors.push('Add at least one step (one per line).');
+  if (errors.length) return { recipe: null, warnings, errors };
+
+  const A = clamp(Math.round(num(d.active)), 0, 240);
+  const Pm = clamp(Math.round(num(d.passive)), 0, 600);
+  const apps = stepLines.map((t) => normApp(t));
+  const cookIdx = apps.map((a, i) => (a !== 'prep' ? i : -1)).filter((i) => i >= 0);
+  const passiveAt = cookIdx.length ? cookIdx : [stepLines.length - 1];
+  const steps = stepLines.map((text, i) => ({
+    text,
+    appliance: apps[i],
+    active: Math.round(A / stepLines.length),
+    passive: passiveAt.includes(i) ? Math.round(Pm / passiveAt.length) : 0,
+  }));
+  const cuisine = String(d.cuisine || 'Quick High-Protein');
+  const raw = {
+    name: String(d.title).trim(),
+    cuisine,
+    slot: d.slot || null,
+    servings: d.servings,
+    emoji: (CUISINE_PROFILES[cuisine] || {}).emoji || '📝',
+    blurb: String(d.blurb || '').trim() || `Your own ${cuisine} recipe.`,
+    ingredients: ings.map((i) => {
+      const amt = num(i.amt);
+      if (i.unit === 'ml') return { name: String(i.name).trim(), ml: amt };
+      if (i.unit === 'pcs') return { name: String(i.name).trim(), amount: amt, unit: 'pcs' };
+      return { name: String(i.name).trim(), g: amt };
+    }),
+    steps,
+    techniques: String(d.tip || '').trim() ? [{ title: 'Michelin tip', text: String(d.tip).trim() }] : [],
+    batch: { freezer: 'ok' },
+  };
+  const recipe = normalizeImportedRecipe(raw, now, warnings, errors);
+  if (recipe) {
+    recipe.id = `mine-${slugify(recipe.name)}-${now.toString(36)}`;
+    recipe.written = true;
+  }
+  const tidy = (w) => w
+    .replace(/ isn't in the database and has no per100 macros, so it counts as 0 kcal\./, ' isn\'t in the ingredient list yet, so it counts as 0 kcal.')
+    .replace(' Edit the JSON for accuracy.', ' Use g or ml for accuracy.');
+  return { recipe, warnings: [...new Set(warnings)].map(tidy), errors };
+}
+
+// ==========================================================================================
+// CUSTOM PANTRY STAPLES
+// ==========================================================================================
+/** Turn typed text into a pantry staple. Known ingredients are reused instead of duplicated. */
+export function customPantryItem(text, existing = []) {
+  const label = String(text || '').trim().replace(/\s+/g, ' ');
+  if (!label) return { error: 'Type an ingredient name.' };
+  const known = matchIngredient(label, ['pantry', 'fresh']);
+  if (known.id && known.exact && !CUSTOM_PANTRY_IDS.includes(known.id)) return { knownId: known.id, cat: getIngredient(known.id).cat };
+  const id = `cp_${slugify(label).replace(/-/g, '_')}`;
+  if (existing.some((x) => x.id === id)) return { duplicate: id };
+  return { item: { id, name: label.charAt(0).toUpperCase() + label.slice(1) } };
 }
