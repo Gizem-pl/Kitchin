@@ -1,6 +1,6 @@
 // sw.js: network-first offline cache, so the app works in the kitchen without a signal.
 // Network-first means a GitHub Pages deploy shows up on the next online launch.
-const CACHE = 'mise-v5';
+const CACHE = 'mise-v6';
 const ASSETS = ['./', 'index.html', 'style.css', 'ui.js', 'engine.js', 'storage.js', 'recipes.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
