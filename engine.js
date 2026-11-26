@@ -31,7 +31,10 @@ export function setCustomData(customRecipes = [], customPantry = []) {
       m: [0, 0, 0, 0], flags: detectFlags(x.name), aliases: [], customPantry: true,
     };
   });
-  CUSTOM_RECIPES.forEach((r) => Object.assign(CUSTOM_INGREDIENTS, r.customIngredients || {}));
+  // Recipes can share an ingredient id: an entry without macros must not wipe one that has them.
+  CUSTOM_RECIPES.forEach((r) => Object.entries(r.customIngredients || {}).forEach(([id, ing]) => {
+    if (!CUSTOM_INGREDIENTS[id] || (ing.m || []).some(Boolean)) CUSTOM_INGREDIENTS[id] = ing;
+  }));
 }
 export const allRecipes = () => [...RECIPES, ...CUSTOM_RECIPES];
 export const customRecipes = () => CUSTOM_RECIPES;
@@ -143,7 +146,10 @@ export function normalizeText(s) {
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9 ]+/g, ' ')
     .split(' ').filter(Boolean)
-    .map((w) => (w.length > 3 ? w.replace(/(es|s)$/, '') : w))
+    .map((w) => {
+      if (w.length <= 3) return w;
+      return /(oes|ches|shes|sses|xes)$/.test(w) ? w.slice(0, -2) : w.replace(/s$/, '');
+    })
     .join(' ');
 }
 
@@ -160,9 +166,17 @@ function namesFor(id) {
   return [id.replace(/_/g, ' '), ing.name, ing.short, ...(ing.aliases || [])].map(normalizeText);
 }
 
+let CATALOGUE_NAMES = null;
+function isCatalogueName(t) {
+  if (!CATALOGUE_NAMES) CATALOGUE_NAMES = new Set(Object.keys(INGREDIENTS).flatMap(namesFor));
+  return CATALOGUE_NAMES.has(t);
+}
+
 /** Does a free-text term (e.g. "cooked carrots") refer to this ingredient? */
 export function ingredientMatchesTerm(id, term) {
   const t = normalizeText(term);
+  // A term that names a known ingredient ("sweet potato") must not spill onto shorter names inside it ("potato").
+  if (isCatalogueName(t)) return namesFor(id).some((n) => ` ${n} `.includes(` ${t} `));
   return namesFor(id).some((n) => termMatches(t, n));
 }
 
@@ -779,7 +793,10 @@ export function summarizeDay(entries = [], targets) {
 
 export function addWeightLog(logs, { date, kg, chest, waist, hip }, now = Date.now()) {
   const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
-  const entry = { id: `w${now.toString(36)}`, date, kg: num(kg), chest: num(chest), waist: num(waist), hip: num(hip) };
+  const prev = logs.find((l) => l.date === date);
+  // A second entry on the same day updates only the fields that were filled in.
+  const keep = (k, v) => num(v) ?? prev?.[k] ?? null;
+  const entry = { id: `w${now.toString(36)}`, date, kg: keep('kg', kg), chest: keep('chest', chest), waist: keep('waist', waist), hip: keep('hip', hip) };
   const others = logs.filter((l) => l.date !== date);
   return [...others, entry].sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -1265,7 +1282,8 @@ const FLAG_EXCEPTIONS = {
 };
 
 export function detectFlags(text) {
-  const t = ` ${String(text || '').toLowerCase().replace(/[-_]/g, ' ')} `;
+  // Words that merely contain a flag word (butter, ham, egg) are removed first.
+  const t = ` ${String(text || '').toLowerCase().replace(/[-_]/g, ' ').replace(/butternut|champignon|champagne|graham|veggie/g, ' ')} `;
   return Object.keys(FLAG_WORDS).filter((flag) => FLAG_WORDS[flag].some((w) => t.includes(w)) && !(FLAG_EXCEPTIONS[flag] || []).some((x) => t.includes(x)));
 }
 
@@ -1275,10 +1293,10 @@ function slugify(s) {
 
 function normApp(v) {
   const t = String(v || '').toLowerCase();
-  if (/instant|pressure/.test(t)) return 'instantpot';
-  if (/air|oven|bake|roast/.test(t)) return 'airfryer';
-  if (/stove|pan|hob|wok|pot|boil|simmer|sear|saut|fry/.test(t)) return 'stovetop';
-  if (/rest|none|passive|marinat|chill|brine|soak/.test(t)) return 'none';
+  if (/\binstant ?pot|\bpressure/.test(t)) return 'instantpot';
+  if (/\bair[ -]?fry|\boven\b|\bbak(e|ed|ing)\b|\broast/.test(t)) return 'airfryer';
+  if (/\bstove|\b(sauce|frying )?pan\b|\bskillet|\bhob\b|\bwok\b|\bpot\b|\bboil|\bsimmer|\bsear|\bsaut|\bfry|\bfried\b/.test(t)) return 'stovetop';
+  if (/\brest(s|ed|ing)?\b(?! of)|\bnone\b|\bpassive|\bmarinat|\bchill(ed|ing)?\b|\bbrine|\bsoak/.test(t)) return 'none';
   return 'prep';
 }
 
@@ -1302,7 +1320,7 @@ function amountToGrams(ing, id, label, warnings) {
     const each = id ? getIngredient(id).each : null;
     if (each) return amt * each;
     if (/clove/.test(unit) || /garlic/.test(label)) return amt * 5;
-    if (/egg/.test(label)) return amt * 50;
+    if (/\beggs?\b/.test(label)) return amt * 50;
     warnings.push(`"${label}": ${amt} ${unit || 'pieces'} was guessed as ${amt * 100} g. Edit the JSON for accuracy.`);
     return amt * 100;
   }
@@ -1370,7 +1388,7 @@ function normalizeImportedRecipe(r, stamp, warnings, errors) {
     custom: true,
     importedAt: stamp,
     name,
-    emoji: typeof r.emoji === 'string' && r.emoji.length <= 8 ? r.emoji : '✨',
+    emoji: typeof r.emoji === 'string' && r.emoji.trim() && r.emoji.length <= 8 && !/[<>&"']/.test(r.emoji) ? r.emoji : '✨',
     cuisine,
     moods: [...new Set([cuisine, ...(Array.isArray(r.moods) ? r.moods.map(String) : [])])],
     slot: normSlot(r.slot),
@@ -1417,8 +1435,13 @@ function normalizeImportedPlan(p, importedRecipes, warnings, now) {
       const t = normalizeText(b.recipe);
       const r = importedRecipes.find((x) => normalizeText(x.name) === t || x.id === b.recipe) || allRecipes().find((x) => normalizeText(x.name) === t || x.id === b.recipe);
       if (r) {
-        if (!r.moods.includes(cuisine)) r.moods.push(cuisine);
-        if (slot === 'Breakfast' && !r.slot) r.slot = 'Breakfast';
+        if (r.custom) {
+          if (!r.moods.includes(cuisine)) r.moods.push(cuisine);
+          if (slot === 'Breakfast' && !r.slot) r.slot = 'Breakfast';
+        } else if (![...r.moods, r.cuisine].includes(cuisine)) {
+          // Built-in recipes can't be re-tagged (it wouldn't survive a reload), so the block follows the recipe.
+          cuisine = [r.cuisine, ...r.moods].find((c) => BATCH_CUISINES.includes(c)) || cuisine;
+        }
         choice = `recipe:${r.id}`;
       } else warnings.push(`Recipe "${b.recipe}" wasn't found.`);
     }
@@ -1653,7 +1676,9 @@ export function generateFridgeRecipe({ settings, fridge = {}, cuisine = 'Japanes
   const sides = realChosen(pick(prof.side));
 
   // 4) Carb: selected fresh carbs first, then pantry, in the cuisine's order.
-  const carbCands = prof.carbs.filter(ok);
+  const cookable = (id) => (CARB_COOKS[id]?.steps || [{ app: 'stovetop' }]).every((st) => !APPLIANCES.some((a) => a.id === st.app)
+    || [st.app, ...Object.keys(st.alt || {})].some((a) => settings.appliances[a]));
+  const carbCands = prof.carbs.filter((id) => ok(id) && cookable(id));
   const carbSorted = [...carbCands.filter((id) => picked.includes(id)), ...carbCands.filter((id) => !picked.includes(id))];
   const carb = carbSorted.length ? carbSorted[v % carbSorted.length] : null;
   if (!carb) notes.push('No carb is available, so this is a low-carb plate.');
@@ -1813,11 +1838,13 @@ export function createUserRecipe(d = {}, now = Date.now()) {
   const apps = stepLines.map((t) => normApp(t));
   const cookIdx = apps.map((a, i) => (a !== 'prep' ? i : -1)).filter((i) => i >= 0);
   const passiveAt = cookIdx.length ? cookIdx : [stepLines.length - 1];
+  const activeSplit = distributeCount(A, stepLines.length);
+  const passiveSplit = distributeCount(Pm, passiveAt.length);
   const steps = stepLines.map((text, i) => ({
     text,
     appliance: apps[i],
-    active: Math.round(A / stepLines.length),
-    passive: passiveAt.includes(i) ? Math.round(Pm / passiveAt.length) : 0,
+    active: activeSplit[i],
+    passive: passiveAt.includes(i) ? passiveSplit[passiveAt.indexOf(i)] : 0,
   }));
   const cuisine = String(d.cuisine || 'Quick High-Protein');
   const raw = {
@@ -1858,6 +1885,7 @@ export function customPantryItem(text, existing = []) {
   const known = matchIngredient(label, ['pantry', 'fresh']);
   if (known.id && known.exact && !CUSTOM_PANTRY_IDS.includes(known.id)) return { knownId: known.id, cat: getIngredient(known.id).cat };
   const id = `cp_${slugify(label).replace(/-/g, '_')}`;
-  if (existing.some((x) => x.id === id)) return { duplicate: id };
+  const same = existing.find((x) => x.id === id || normalizeText(x.name) === normalizeText(label));
+  if (same) return { duplicate: same.id };
   return { item: { id, name: label.charAt(0).toUpperCase() + label.slice(1) } };
 }

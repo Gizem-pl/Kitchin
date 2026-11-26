@@ -160,7 +160,7 @@ function renderQuick() {
 
   // Fridge selector
   h += `<section class="card">
-    <div class="card-head"><h2>${f.leftoverMode ? 'Fresh extras' : 'What\'s in your fridge?'}</h2>${trayIds.length ? '<button type="button" class="link" data-act="clearFridge">Clear</button>' : ''}</div>`;
+    <div class="card-head"><h2>${f.leftoverMode ? 'Fresh extras' : 'What\'s in your fridge?'}</h2>${trayIds.length || f.custom.length ? '<button type="button" class="link" data-act="clearFridge">Clear</button>' : ''}</div>`;
   if (trayIds.length || f.custom.length) {
     h += `<div class="tray">${trayIds.map((id) => `
       <span class="pill ${uf.has(id) ? 'hot' : ''}">
@@ -504,6 +504,7 @@ function aiCard() {
 
 function renderModal() {
   const m = $('#modal');
+  const top = $('.modal-scroll', m)?.scrollTop || 0;
   if (UI.modal === 'write') {
     m.setAttribute('aria-label', 'Write my own recipe');
     renderWriteModal();
@@ -511,6 +512,7 @@ function renderModal() {
     m.setAttribute('aria-label', 'Import recipe or batch plan');
     renderImportModal();
   }
+  $('.modal-scroll', m).scrollTop = top; // keep the reader's place across re-renders
 }
 
 function renderImportModal() {
@@ -1233,7 +1235,12 @@ const actions = {
     render();
   },
   metric(el) { UI.weightMetric = el.dataset.v; render(); },
-  toggleMeasure() { UI.showMeasure = !UI.showMeasure; render(); },
+  toggleMeasure(el) {
+    const typed = [...new FormData(el.closest('form'))];
+    UI.showMeasure = !UI.showMeasure; render();
+    const form = $('[data-form="weight"]');
+    typed.forEach(([k, v]) => { if (form.elements[k]) form.elements[k].value = v; });
+  },
   delWeight(el) {
     const prev = S.weightLogs;
     S.weightLogs = E.removeWeightLog(S.weightLogs, el.dataset.id);
@@ -1273,6 +1280,8 @@ const actions = {
     if (!confirm('Reset everything? This deletes your logs, weights and settings on this device.')) return;
     await store.clearAll();
     S = E.defaultUserData();
+    UI.draft = null;
+    UI.importText = '';
     E.setDraftRecipe(null);
     syncCustom();
     render();
@@ -1329,7 +1338,7 @@ const actions = {
       S.cart.eaten = S.cart.eaten.filter((x) => x !== id);
       delete S.cart.eatenLog[id];
       persist('cart', 'mealLogs'); render();
-      toast('Unmarked and removed from today\'s log');
+      toast('Unmarked and removed from your log');
       return;
     }
     const c = E.planCart(S.cart, S.settings, S.recipePrefs).containers.find((x) => x.id === id);
@@ -1425,13 +1434,14 @@ const forms = {
     const txt = String(fd.get('item') || '').trim();
     if (!txt) return;
     const id = E.findIngredientByName(txt, ['fresh', 'leftover', 'pantry']);
-    if (id && INGREDIENTS[id].cat === 'fresh') {
+    const cat = id ? E.getIngredient(id).cat : null; // custom staples aren't in INGREDIENTS
+    if (cat === 'fresh') {
       if (!S.fridge.selected.includes(id)) S.fridge.selected.push(id);
       toast(`Added ${name(id)}`);
-    } else if (id && INGREDIENTS[id].cat === 'leftover') {
+    } else if (cat === 'leftover') {
       if (!S.fridge.leftovers.includes(id)) S.fridge.leftovers.push(id);
       toast(`Added ${name(id)} (Leftover Remixer)`);
-    } else if (id && INGREDIENTS[id].cat === 'pantry') {
+    } else if (cat === 'pantry') {
       S.settings.pantry[id] = true; persist('settings');
       toast(`${name(id)} is a pantry staple and is now switched on`);
     } else if (!S.fridge.custom.some((c) => c.toLowerCase() === txt.toLowerCase())) {
@@ -1496,7 +1506,10 @@ const changes = {
     reader.onload = async () => {
       try {
         const parsed = JSON.parse(reader.result);
-        S = E.mergeUserData(parsed.data || parsed);
+        const data = parsed.data || parsed;
+        // Without this check any JSON file would replace everything with defaults.
+        if (!PERSISTED.some((k) => data[k] !== undefined)) throw new Error('Not a backup');
+        S = E.mergeUserData(data);
         syncCustom();
         await store.saveAll(S);
         render();
@@ -1506,11 +1519,23 @@ const changes = {
       }
     };
     reader.readAsText(file);
+    el.value = ''; // let the same file be picked again
   },
 };
 
+// A home-screen app can stay in memory overnight: move "Today" on when the date changes.
+let currentDay = E.dayKey(new Date());
+function rollDay() {
+  const now = E.dayKey(new Date());
+  if (now === currentDay) return false;
+  if (UI.logDate === currentDay) UI.logDate = now;
+  currentDay = now;
+  return true;
+}
+
 function bind() {
   document.addEventListener('click', (e) => {
+    rollDay();
     const el = e.target.closest('[data-act]');
     if (!el || el.disabled) return;
     const fn = actions[el.dataset.act];
@@ -1525,6 +1550,7 @@ function bind() {
     const form = e.target.closest('[data-form]');
     if (!form) return;
     e.preventDefault();
+    rollDay();
     const fn = forms[form.dataset.form];
     if (fn) fn(new FormData(form));
   });
@@ -1535,7 +1561,10 @@ function bind() {
   const draftInput = (e) => {
     const t = e.target;
     if (!t.matches) return;
-    if (t.matches('[data-input="importText"]')) UI.importText = t.value;
+    if (t.matches('[data-input="importText"]')) {
+      UI.importText = t.value;
+      if (e.type === 'input') UI.importResult = null; // edited text must be parsed again before saving
+    }
     if (!UI.draft) return;
     if (t.matches('[data-draft]')) UI.draft[t.dataset.draft] = t.value;
     if (t.matches('[data-draft-ing]')) { const row = UI.draft.ings[Number(t.dataset.draftIng)]; if (row) row[t.dataset.k] = t.value; }
@@ -1548,6 +1577,7 @@ function bind() {
   // Write pending changes before iOS suspends the web app.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') store.flush((k) => S[k]);
+    else if (rollDay()) render();
   });
   window.addEventListener('pagehide', () => store.flush((k) => S[k]));
 }

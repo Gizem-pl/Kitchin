@@ -61,7 +61,15 @@ export function createStore(backend = localStorageBackend) {
   /** Debounced write: coalesces rapid taps into one write per key. */
   function save(key, value, delay = 250) {
     clearTimeout(timers[key]);
-    timers[key] = setTimeout(() => { set(key, value); }, delay);
+    timers[key] = setTimeout(() => { delete timers[key]; set(key, value); }, delay);
+  }
+
+  /** Drop pending writes so they can't land on top of a reset or a restored backup. */
+  function cancelPending() {
+    Object.keys(timers).forEach((key) => {
+      clearTimeout(timers[key]);
+      delete timers[key];
+    });
   }
 
   /** Write any pending debounced values immediately (e.g. when the app is backgrounded). */
@@ -83,12 +91,14 @@ export function createStore(backend = localStorageBackend) {
   }
 
   async function saveAll(data) {
+    cancelPending();
     for (const k of Object.values(KEYS)) {
       if (data[k] !== undefined) await set(k, data[k]);
     }
   }
 
   async function clearAll() {
+    cancelPending();
     for (const k of Object.values(KEYS)) await backend.removeItem(PREFIX + k);
   }
 
